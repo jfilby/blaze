@@ -155,7 +155,15 @@ test("a program is built from the IR the compiler resolved, with no answer from 
 
   assert.equal(outcome.build.status, "success", "the resolved IR is a program the compiler may lower");
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
-  assert.deepEqual(outcome.build.selectedCandidates, { total: "c1" });
+  // A module may also offer internal getters for values the program holds;
+  // the function under review is the one in the source, and it was built
+  // without any answer from the model.
+  const selected = outcome.build.selectedCandidates ?? {};
+  assert.equal(selected.total, "c1");
+  assert.ok(
+    Object.values(selected).every((candidate) => candidate === "c1"),
+    `no candidate came from the model: ${JSON.stringify(selected)}`,
+  );
 
   // The IR the build delivered is the IR the compiler resolved, byte for byte:
   // a review that proposed nothing left it exactly as the source was written.
@@ -165,10 +173,12 @@ test("a program is built from the IR the compiler resolved, with no answer from 
   assert.equal(candidates[0].proposals, undefined, "nothing was proposed, so nothing was rewritten");
 
   // The review is what the model was asked for, and the IR it read is the
-  // artifact the build delivers.
-  assert.equal(endpoint.prompts.length, 1, "the IR is reviewed once");
-  assert.match(endpoint.prompts[0] ?? "", /THE SEMANTIC IR THE COMPILER RESOLVED THE SOURCE INTO/);
-  assert.ok((endpoint.prompts[0] ?? "").includes(resolved()), "the review reads the artifact as it stands");
+  // artifact the build delivers. The module's internal getters are reviewed
+  // beside the function the source wrote.
+  assert.ok(endpoint.prompts.length >= 1, "the IR is reviewed");
+  const review = endpoint.prompts.find((prompt) => prompt.includes(resolved())) ?? "";
+  assert.match(review, /THE SEMANTIC IR THE COMPILER RESOLVED THE SOURCE INTO/);
+  assert.ok(review.includes(resolved()), "the review reads the artifact as it stands");
 
   // The binary is the one the build verified, and the source is the
   // specification: node runs the TypeScript, the compiler's binary runs the
@@ -196,10 +206,13 @@ test("a review that proposes a fix has it applied, and the artifact is regenerat
 
   assert.equal(outcome.build.status, "success");
   const candidates = await recorded(directory);
-  assert.equal(candidates.length, 1);
-  assert.match(candidates[0].text, /set sum \+= \[mul\[f64\] \[element\[f64\] local\[\[\]f64\] values local\[i64\] index\] const\[f64\] 0\.25\]/);
-  assert.doesNotMatch(candidates[0].text, /\[div\[f64\]/);
-  assert.deepEqual(candidates[0].proposals, ["`reciprocal-multiply entry`: turned 1 division(s) in entry into a multiplication by their reciprocal"]);
+  // The getters the module offers are recorded beside the function the review
+  // rewrote; the proposal is the one that names that function's division.
+  const rewritten = candidates.find((candidate) => candidate.proposals !== undefined);
+  assert.ok(rewritten !== undefined, "the review proposed a fix for the reviewed function");
+  assert.match(rewritten.text, /set sum \+= \[mul\[f64\] \[element\[f64\] local\[\[\]f64\] values local\[i64\] index\] const\[f64\] 0\.25\]/);
+  assert.doesNotMatch(rewritten.text, /\[div\[f64\]/);
+  assert.deepEqual(rewritten.proposals, ["`reciprocal-multiply entry`: turned 1 division(s) in entry into a multiplication by their reciprocal"]);
 
   // The regenerated function is the one the build verified: the program it is
   // part of still prints what the source prints.
@@ -207,7 +220,7 @@ test("a review that proposes a fix has it applied, and the artifact is regenerat
   const binary = run(outcome.outputPath as string, [], { timeoutMs: 60_000 });
   assert.equal(binary.code, 0, binary.stderr);
   assert.equal(binary.stdout, run("node", [join(directory, "main.ts")], { timeoutMs: 60_000 }).stdout);
-  assert.equal(endpoint.prompts.length, 1);
+  assert.ok(endpoint.prompts.length >= 1);
 });
 
 test("a proposal the compiler refuses leaves the artifact as it was, and says why", async (t) => {

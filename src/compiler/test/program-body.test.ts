@@ -1077,15 +1077,16 @@ test("a parameter the source may leave out is the type it was declared", () => {
     },
     "main.ts",
   );
-  const declared = phase.body?.statements.find((statement) => statement.kind === "function");
-  assert.ok(declared !== undefined && declared.kind === "function", "the function is a statement of the program");
-  if (declared === undefined || declared.kind !== "function") throw new Error("expected a function");
+  // `bias` is a module number held in a runtime cell, so a function that reads
+  // it is a function of the module rather than one of the program's statements.
+  const declared = phase.program.files[0]?.functions["add"];
+  assert.ok(declared !== undefined, "the function is compiled by the module");
   assert.deepEqual(
-    declared.params.map((param) => [param.name, param.type]),
-    [["a", "number"], ["b", "number"]],
+    declared.function.params.map((param) => [param.name, param.type]),
+    [["a", "f64"], ["b", "f64"]],
     "the optional parameter is the number it was declared",
   );
-  assert.equal(declared.params[1]?.default, undefined, "a `?` names no value a shorter arity hands over");
+  assert.ok(!("default" in declared.function.params[1]), "a `?` names no value a shorter arity hands over");
 });
 
 test("a string is given to a function of a program by value", () => {
