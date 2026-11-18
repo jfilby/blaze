@@ -1413,9 +1413,11 @@ function fieldReadsAs(declared: SemanticType, read: SemanticType): boolean {
   return convertibleTo(declared, read);
 }
 
-/** A reference, a number and a text are the one machine word a handle is. */
+/** A reference, a machine number and a text are the one machine word a handle
+ * is. A wide number is four limbs and has no such word, so writing one where a
+ * double is read is the low half of a value the program never computed. */
 function wordHandle(from: SemanticType, to: SemanticType): boolean {
-  const word = (type: SemanticType): boolean => isReference(type) || isNumber(type) || isTextType(type);
+  const word = (type: SemanticType): boolean => isReference(type) || (isNumber(type) && !isWideType(type)) || isTextType(type);
   return word(from) && word(to) && !typeEquals(from, to);
 }
 
