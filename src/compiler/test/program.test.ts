@@ -338,8 +338,8 @@ test("modules that import each other are contracted once, as one program", () =>
 test("a type an import names types the annotations of the file that imports it", () => {
   // A type is not a runtime import: the file that declares an interface offers
   // no function to link, and the file that names it reads the field types the
-  // declaration wrote. The alias `Names` is the list `string[]` and the
-  // interface is still the opaque reference a contract holds.
+  // declaration wrote. The alias `Names` is the list `string[]`, and the
+  // interface is the named record the declaring file laid out.
   const program = contract(
     {
       "types.ts": [
@@ -366,7 +366,7 @@ test("a type an import names types the annotations of the file that imports it",
   const main = program.files.find((file) => file.path === "main.ts");
   assert.ok(main !== undefined);
   assert.deepEqual(main.functions.count?.function.params, [
-    { name: "contract", type: "ref<any>" },
+    { name: "contract", type: "ref<Contract__types>" },
     { name: "names", type: "slice<text>" },
   ]);
   const types = program.files.find((file) => file.path === "types.ts");
