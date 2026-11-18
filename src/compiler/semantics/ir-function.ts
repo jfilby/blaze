@@ -3092,6 +3092,20 @@ class FunctionBody {
   private wideOperand(value: SemanticValue, type: SemanticType, line: number): SemanticValue {
     if (!isWideType(type) || isWideType(fieldOfValue(value, "type") as SemanticType)) return value;
     if (value.k === "const") return this.widenLiteral(value, type);
+    // A field read of an object written at the use is the value the field
+    // holds: a constant the module wrote is a literal the source reads, and a
+    // literal beside a wide number is widened to the number it says. Without
+    // this, a constant's field stays a machine word the wide kernel cannot take.
+    if (value.k === "loadField") {
+      const object = fieldOfValue(value, "object") as SemanticValue;
+      if (object.k === "newObject") {
+        const field = String(fieldOfValue(value, "field"));
+        const held = (fieldOfValue(object, "fields") as { name: string; value: SemanticValue }[]).find(
+          (one) => String(fieldOfValue(one, "name")) === field,
+        );
+        if (held !== undefined) return this.wideOperand(fieldOfValue(held, "value") as SemanticValue, type, line);
+      }
+    }
     // A choice of two written values is widened in both arms: it is the value
     // of either, and neither arm needs a store to become the wide number.
     if (value.k === "select") {
