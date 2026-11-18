@@ -1042,7 +1042,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
   }
 
   call(call: SemanticCall, argumentsText: string[]): string {
-    return `${cSymbolName(String(fieldOf(fieldOf(call,"signature"),"symbol")))}(${argumentsText.join(", ")})`;
+    // A call in a function's stored definition names its callee but need not
+    // carry the resolved signature, so the symbol the driver writes comes from
+    // the signature when one is present and from the name otherwise.
+    const symbol = fieldOf(fieldOf(call,"signature"),"symbol") ?? fieldOf(call,"callee");
+    return `${cSymbolName(String(symbol))}(${argumentsText.join(", ")})`;
   }
 
   builtin(call: SemanticCall, argumentsText: string[], expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
