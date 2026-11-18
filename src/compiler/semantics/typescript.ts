@@ -15751,7 +15751,14 @@ class TypeScriptParser {
             );
           }
         }
-        arrowParams.push({ name: name.text, type: type, ...(fallback === undefined ? {} : { default: fallback }) });
+        arrowParams.push({
+          name: name.text,
+          type: type,
+          ...(fallback === undefined ? {} : { default: fallback }),
+          // The rest parameter is the last one, and the call that packs the
+          // arguments after it needs to know which one it is.
+          ...(rest ? { rest: true as const } : {}),
+        });
         paramTypeNames[paramTypeNames.length] = typeName;
         paramFunctions[paramFunctions.length] = functionType;
         paramShapes[paramShapes.length] = shape;

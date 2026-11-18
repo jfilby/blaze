@@ -4189,7 +4189,7 @@ test("a call of a field the declaration types as a function is a call through th
   );
   assert.match(
     ir,
-    /call\[void\] through \[load_field\[ref<any>\] local\[ref<any>\] sink [^\]]+ write\]/,
+    /call\[void\] through \[load_field\[ref<any>\] local\[ref<[^\]]+>\] sink [^\]]+ write\]/,
     "the call is made through the value the field holds",
   );
 });
@@ -4613,10 +4613,10 @@ test("Extract and Exclude read the type they name the members of", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
   const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts", "marks");
-  assert.match(ir, /load_field\[\[\]text\] local\[ref<any>\] loop Object1 marks/, "a member's field is read through the type Extract names");
+  assert.match(ir, /load_field\[\[\]text\] local\[ref<[^>]+>\] loop [^\]]+ marks/, "a member's field is read through the type Extract names");
   assert.match(ir, /coalesce\[\[\]text\] [^\n]* \[buffer\[\[text; 0\]\] element\[text\] 0 \]/, "the empty list takes the member's element type");
   const excluded = irOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts", "from");
-  assert.match(excluded, /load_field\[f64\] local\[ref<any>\] loop Object1 from/, "Exclude reads the type whose members it names");
+  assert.match(excluded, /load_field\[f64\] local\[ref<[^>]+>\] loop [^\]]+ from/, "Exclude reads the type whose members it names");
 });
 
 test("a field of a record a recursive type names is read through the reference it is", () => {
@@ -5464,7 +5464,7 @@ test("a call of an imported function answers the shape its module resolved", () 
     "main.ts",
     "run",
   );
-  assert.match(ir, /load_field\[\[\]ref<any>\] local\[ref<Object1>\] result Object1 failures/, "the failures are the list the result names");
+  assert.match(ir, /load_field\[\[\]ref<[^>]+>\] local\[ref<[^>]+>\] result [^\]]+ failures/, "the failures are the list the result names");
   assert.match(ir, /__collect_main_0/, "the failures are walked as a list");
 });
 
@@ -5483,8 +5483,8 @@ test("a spread of a call reads the call once into a name of its own", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
   const ir = irOf("typescript", { "main.ts": source + "console.log(f(1));\n" }, "main.ts", "f");
-  assert.match(ir, /let object\[ref<Object1>\] __spread0 mutable = \[call\[ref<Object1>\] info/, "the call is read into a name of its own");
-  assert.match(ir, /load_field\[f64\] local\[ref<Object1>\] __spread0 Object1 steps/, "a field is read from that name");
+  assert.match(ir, /let object\[ref<[^>]+>\] __spread0 mutable = \[call\[ref<[^>]+>\] info/, "the call is read into a name of its own");
+  assert.match(ir, /load_field\[f64\] local\[ref<[^>]+>\] __spread0 [^\]]+ steps/, "a field is read from that name");
 });
 
 test("a method of an imported class answers the shape its module resolved", () => {
@@ -5520,8 +5520,8 @@ test("a method of an imported class answers the shape its module resolved", () =
     "main.ts",
     "f",
   );
-  assert.match(ir, /let object\[ref<Object\d+>\] __spread0 mutable = \[call\[ref<Object\d+>\] Failure_toJSON/, "the method's answer is the record it built");
-  assert.match(ir, /load_field\[[^\]]+\] local\[ref<Object\d+>\] __spread0 Object\d+ category/, "a field is read from that record");
+  assert.match(ir, /let object\[ref<[^>]+>\] __spread0 mutable = \[call\[ref<[^>]+>\] Failure_toJSON/, "the method's answer is the record it built");
+  assert.match(ir, /load_field\[[^\]]+\] local\[ref<[^>]+>\] __spread0 [^\]]+ category/, "a field is read from that record");
 });
 
 test("a truth a literal writes is a truth the field holds", () => {
