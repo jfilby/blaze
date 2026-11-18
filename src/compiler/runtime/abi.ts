@@ -2208,8 +2208,65 @@ export const TEXT_SYMBOLS: Record<string, true> = Object.fromEntries(
 function runtimeSymbolTable(): Record<string, true> {
   const symbols: Record<string, true> = {};
   for (const item of RUNTIME_ABI) symbols[String(fieldOf(item, "symbol"))] = true;
+  // A lowering that carries a value as a double calls the handle-taking form
+  // of a tagged service. Those forms are the compiler's own bridge over the
+  // runtime, not ABI entries a host adapter implements, but generated code may
+  // still name them and the validator has to know they resolve at link time.
+  for (const name of HANDLE_WRAPPER_SYMBOLS) symbols[name] = true;
   return symbols;
 }
+
+const HANDLE_WRAPPER_SYMBOLS: readonly string[] = [
+  "blaze_pointer_of_handle",
+  "blaze_rt_array_get_from_handle",
+  "blaze_rt_array_length_from_handle",
+  "blaze_rt_array_push_from_handle",
+  "blaze_rt_array_set_from_handle",
+  "blaze_rt_clone_from_handle",
+  "blaze_rt_dict_delete_from_handle",
+  "blaze_rt_dict_delete_numkey_from_handle",
+  "blaze_rt_dict_delete_refkey_from_handle",
+  "blaze_rt_dict_get_from_handle",
+  "blaze_rt_dict_get_numkey_from_handle",
+  "blaze_rt_dict_get_numkey_ref_from_handle",
+  "blaze_rt_dict_get_numkey_text_from_handle",
+  "blaze_rt_dict_get_ref_from_handle",
+  "blaze_rt_dict_get_refkey_from_handle",
+  "blaze_rt_dict_get_refkey_ref_from_handle",
+  "blaze_rt_dict_get_refkey_text_from_handle",
+  "blaze_rt_dict_get_text_from_handle",
+  "blaze_rt_dict_has_from_handle",
+  "blaze_rt_dict_has_numkey_from_handle",
+  "blaze_rt_dict_has_refkey_from_handle",
+  "blaze_rt_dict_key_at_from_handle",
+  "blaze_rt_dict_key_num_at_from_handle",
+  "blaze_rt_dict_key_ref_at_from_handle",
+  "blaze_rt_dict_len_from_handle",
+  "blaze_rt_dict_set_from_handle",
+  "blaze_rt_dict_set_numkey_from_handle",
+  "blaze_rt_dict_set_numkey_ref_from_handle",
+  "blaze_rt_dict_set_numkey_text_from_handle",
+  "blaze_rt_dict_set_ref_from_handle",
+  "blaze_rt_dict_set_refkey_from_handle",
+  "blaze_rt_dict_set_refkey_ref_from_handle",
+  "blaze_rt_dict_set_refkey_text_from_handle",
+  "blaze_rt_dict_set_text_from_handle",
+  "blaze_rt_dict_value_at_from_handle",
+  "blaze_rt_dict_value_at_ref_from_handle",
+  "blaze_rt_dict_value_at_text_from_handle",
+  "blaze_rt_dict_values_from_handle",
+  "blaze_rt_is_array_from_handle",
+  "blaze_rt_json_parse_from_handle",
+  "blaze_rt_json_parse_handle",
+  "blaze_rt_json_stringify_value_from_handle",
+  "blaze_rt_length_from_handle",
+  "blaze_rt_object_copy_from_handle",
+  "blaze_rt_object_set_list_from_handle",
+  "blaze_rt_object_set_number_from_handle",
+  "blaze_rt_object_set_ref_from_handle",
+  "blaze_rt_object_set_text_from_handle",
+  "blaze_rt_to_text_from_handle",
+];
 export const RUNTIME_SYMBOLS: Record<string, true> = runtimeSymbolTable();
 
 /**
