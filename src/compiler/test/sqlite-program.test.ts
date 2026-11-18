@@ -8,13 +8,23 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import { scratch } from "./scratch.ts";
 import { writeProject } from "./project.ts";
 import { run } from "../core/process.ts";
+import { skipWithoutModelKey } from "./model-endpoint.ts";
+
+
+/** These builds ask a real model, which needs a credential in the environment. */
+const modelTest = (name: string, fn: (t: TestContext) => void | Promise<void>): void => {
+  test(name, async (t) => {
+    if (skipWithoutModelKey(t)) return;
+    await fn(t);
+  });
+};
 
 const QUIET = () => {};
 
@@ -74,12 +84,12 @@ async function buildProgram(source: string, backend: "c" | "machine" = "c"): Pro
   return { binary, stdout: ran.stdout };
 }
 
-test("a program that uses SQLite is built and prints what its source prints", async () => {
+modelTest("a program that uses SQLite is built and prints what its source prints", async () => {
   const built = await buildProgram(PROGRAM);
   assert.equal(built.stdout.trim(), "1 the first note", "the program printed the row it read back");
 });
 
-test("the machine backend builds a program that uses SQLite too", async () => {
+modelTest("the machine backend builds a program that uses SQLite too", async () => {
   const built = await buildProgram(PROGRAM, "machine");
   assert.equal(built.stdout.trim(), "1 the first note", "the machine backend printed the row it read back");
 });

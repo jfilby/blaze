@@ -14024,7 +14024,10 @@ class TypeScriptParser {
             continue;
           }
         }
-        if (target.k === "member" && target.base.k === "ident" && new Set(["Math", "http", "JSON", "Date", "Promise", "posix"]).has(target.base.name)) {
+        // The namespaces a function of a file may call, which are the ones the
+        // program parser reads too. `sqlite` was missing here, so a module
+        // initializer that opened a database left a refused call in its body.
+        if (target.k === "member" && target.base.k === "ident" && new Set(["Math", "http", "JSON", "Date", "Promise", "posix", "crypto", "fs", "console", "process", "Deno", "Bun", "performance", "sqlite"]).has(target.base.name)) {
           // A call of a namespace is a call of the name the namespace and the
           // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
           // `http.requestPath(req)` is the HTTP call of that name. It is not a

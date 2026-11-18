@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
@@ -19,6 +19,16 @@ import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { scratch } from "./scratch.ts";
 import { writeProject } from "./project.ts";
 import { run } from "../core/process.ts";
+import { skipWithoutModelKey } from "./model-endpoint.ts";
+
+
+/** These builds ask a real model, which needs a credential in the environment. */
+const modelTest = (name: string, fn: (t: TestContext) => void | Promise<void>): void => {
+  test(name, async (t) => {
+    if (skipWithoutModelKey(t)) return;
+    await fn(t);
+  });
+};
 
 const QUIET = () => {};
 
@@ -55,7 +65,7 @@ sqlite.close(db);
 /** The expected output of the program above. */
 const EXPECTED = ["1", "0", "1", "1", "4", "1 3 2 0", "1 first 1.5", "not an error"].join("\n");
 
-test("a program that calls every call of the SQLite facility is built and run", async () => {
+modelTest("a program that calls every call of the SQLite facility is built and run", async () => {
   const directory = await scratch("blaze-sqlite-facility-");
   await writeFile(join(directory, "main.ts"), PROGRAM, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
@@ -87,7 +97,7 @@ function driverFor(source: string): string {
   return generateProgramDriver(resolved, false, "c", true);
 }
 
-test("the calls of the SQLite facility lower to the entry points of the ABI", () => {
+modelTest("the calls of the SQLite facility lower to the entry points of the ABI", () => {
   const written = driverFor(`const db = sqlite.open(":memory:");
 const stmt = sqlite.prepare(db, "SELECT 1");
 sqlite.bindText(stmt, 1, "a");
@@ -128,7 +138,7 @@ sqlite.close(db);
   assert.match(written, /#include "blaze_sqlite\.h"/, "the driver includes the header of the ABI");
 });
 
-test("a program that does not use SQLite includes no SQLite header", () => {
+modelTest("a program that does not use SQLite includes no SQLite header", () => {
   const phase = phaseOf("typescript", { "main.ts": 'console.log("hello");' }, "main.ts");
   if (phase.body === undefined) throw new Error("no program body");
   const resolved = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
@@ -136,7 +146,7 @@ test("a program that does not use SQLite includes no SQLite header", () => {
   assert.ok(!written.includes("blaze_sqlite"), "a program that does not use SQLite names no SQLite symbol");
 });
 
-test("a function of a program body may use SQLite", async () => {
+modelTest("a function of a program body may use SQLite", async () => {
   const program = `const db = sqlite.open(":memory:");
 sqlite.exec(db, "CREATE TABLE notes (id INTEGER PRIMARY KEY)");
 const insert = sqlite.prepare(db, "INSERT INTO notes (id) VALUES (?)");
