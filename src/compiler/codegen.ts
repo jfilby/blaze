@@ -381,26 +381,64 @@ export interface Machine {
   measure<T>(task: () => T | Promise<T>): Promise<T>;
 }
 
-/**
- * The machine work is admitted to.
- *
- * A candidate's build and benchmark are run one after another by the caller,
- * and the two phases keep their names so a request is answered the same way.
- * A native compiler may later hold the machine for a measurement and let
- * shared work run beside it; what it owes now is the same answer.
- */
-class MachineQueue implements Machine {
-  async run<T>(task: () => T | Promise<T>): Promise<T> {
-    return (task as (value: unknown) => T | Promise<T>)(undefined);
-  }
-
-  async measure<T>(task: () => T | Promise<T>): Promise<T> {
-    return (task as (value: unknown) => T | Promise<T>)(undefined);
-  }
+/** Work that has asked for the machine and not been given it yet. */
+interface Waiting {
+  /** Whether it is a measurement, which is what the machine is held for. */
+  readonly timed: boolean;
+  /** Lets it on and counts it against the machine. */
+  readonly admit: () => void;
 }
 
+/**
+ * The queue the two phases of a candidate share. A task that fails gives the
+ * machine back for the next one: a candidate that could not be built must not
+ * strand every candidate queued behind it.
+ */
 export function machine(): Machine {
-  return new MachineQueue();
+  const waiting: Waiting[] = [];
+  let shared = 0;
+  let timed = 0;
+
+  // Shared work ahead of a measurement is let on, because it is ahead of it
+  // and running it is what lets the measurement be reached at all: refusing it
+  // for the sake of a measurement queued behind it would leave that
+  // measurement waiting for work that was itself waiting for it. Shared work
+  // behind a measurement is never let on ahead of it, so a build that keeps
+  // producing work cannot push a measurement to the back of it.
+  const drain = (): void => {
+    while (waiting.length > 0 && timed === 0) {
+      const next = waiting[0] as Waiting;
+      if (next.timed && shared > 0) return;
+      waiting.shift();
+      next.admit();
+      if (next.timed) return;
+    }
+  };
+
+  const take = <T>(isTimed: boolean, task: () => T | Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      waiting.push({
+        timed: isTimed,
+        admit: () => {
+          if (isTimed) timed += 1;
+          else shared += 1;
+          Promise.resolve()
+            .then(task)
+            .then(resolve, reject)
+            .finally(() => {
+              if (isTimed) timed -= 1;
+              else shared -= 1;
+              drain();
+            });
+        },
+      });
+      drain();
+    });
+
+  return {
+    run: <T>(task: () => T | Promise<T>) => take(false, task),
+    measure: <T>(task: () => T | Promise<T>) => take(true, task),
+  };
 }
 
 export interface CandidateEvaluationRequest {
