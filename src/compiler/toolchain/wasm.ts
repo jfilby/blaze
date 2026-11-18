@@ -17,6 +17,7 @@
 import { readFile, stat, writeFile } from "../core/platform.ts";
 import { bufferElement, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
+import type { WebAssemblyEngine } from "../core/platform.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, PrimitiveTypeName, Runner, TypeExpr } from "../core/types.ts";
 
@@ -295,11 +296,43 @@ export function moduleServices(bytes: Uint8Array): string[] {
  * that imports a function the table does not name is a module that reaches for
  * a system interface, and it is refused before it can.
  */
-export function boundaryProblems(_bytes: Uint8Array, _expected?: string): string[] | null {
-  // The boundary is checked by the child process that carries a WebAssembly
-  // engine. The native compiler has none, and a module's imports and exports
-  // are the same question wherever they are read.
-  return null;
+export function boundaryProblems(bytes: Uint8Array, expected?: string): string[] | null {
+  // The compiler runs under a host that has WebAssembly, so a module's imports
+  // and exports are read here rather than deferred to a child the self-host
+  // subset cannot carry. A host without one still answers the unknown.
+  const engine = (globalThis as unknown as Record<string, unknown>)["WebAssembly"] as WebAssemblyEngine | undefined;
+  if (engine === undefined) return null;
+  if (!engine.validate(bytes)) return ["the module is not valid WebAssembly"];
+  const module = new engine.Module(bytes);
+  const problems: string[] = [];
+  const imports = engine.Module.imports(module);
+  const memoryImports = imports.filter((entry) => entry.kind === "memory");
+  if (memoryImports.length !== 1 || memoryImports[0]?.module !== "env" || memoryImports[0]?.name !== "memory") {
+    problems.push('the module must import one memory: (import "env" "memory" ...)');
+  }
+  for (const entry of imports) {
+    if (entry.kind === "memory") continue;
+    if (entry.kind !== "function") {
+      problems.push(`the module must not import the ${entry.kind} "${entry.name}"; it reaches the host through the services of the host ABI`);
+      continue;
+    }
+    if (entry.module !== "env") {
+      problems.push(`the module must import its services from "env", not from "${entry.module}"`);
+      continue;
+    }
+    if (entry.name === POW_IMPORT) continue;
+    if (hostServiceBySymbol(entry.name) === null) {
+      problems.push(`the module must not import "${entry.name}"; it is not a service of the host ABI`);
+    }
+  }
+  const exports = engine.Module.exports(module).map((entry) => entry.name);
+  if (exports.includes("memory") || exports.includes("_start")) {
+    problems.push("the module must not export memory or _start; the host provides both");
+  }
+  if (expected !== undefined && !exports.includes(expected)) {
+    problems.push(`the module must export the contracted function "${expected}"`);
+  }
+  return problems;
 }
 
 /**
