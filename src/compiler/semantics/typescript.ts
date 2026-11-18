@@ -14573,8 +14573,17 @@ class TypeScriptParser {
             // file is marked so the program parser reads it when it runs.
             let root: Expression = receiver;
             while (root.k === "member" || root.k === "index") root = root.base;
-            if (root.k === "ident" && builtinFor(`${root.name}.${target.field}`) !== null) {
-              this.programBuiltin = true;
+            if (root.k === "ident") {
+              const builtinName = `${root.name}.${target.field}`;
+              // The methods a handler calls on the response it was given are
+              // the program's own builtins. Reading them here as the named call
+              // they lower to keeps them from being deferred as an unknown
+              // method on a value the read cannot type.
+              if (root.name === "res" && builtinFor(builtinName) !== null) {
+                replace({ k: "call", name: builtinName, args: [receiver, ...args] });
+                continue;
+              }
+              if (builtinFor(builtinName) !== null) this.programBuiltin = true;
             }
             if (this.pendingHolds(receiver) || (this.opaqueValue(receiver) && unshaped)) {
               // What the method answers is a value of the same unlinked

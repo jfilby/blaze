@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,6 +19,7 @@ import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
+import { skipWithoutModelKey } from "./model-endpoint.ts";
 
 const QUIET = () => {};
 
@@ -80,7 +81,16 @@ async function curlPort(port: number, authority = "localhost"): Promise<string> 
   throw new assert.AssertionError({ message: `server on port ${port} did not answer: ${lastError}` });
 }
 
-test("C backend serves HTTP with --runtime facil", async () => {
+
+/** These builds ask a real model, which needs a credential in the environment. */
+const modelTest = (name: string, fn: (t: TestContext) => void | Promise<void>): void => {
+  test(name, async (t) => {
+    if (skipWithoutModelKey(t)) return;
+    await fn(t);
+  });
+};
+
+modelTest("C backend serves HTTP with --runtime facil", async () => {
   const binary = await buildHttpBinary("c", HTTP_SOURCE);
   const server = await startServer(binary);
   try {
@@ -92,7 +102,7 @@ test("C backend serves HTTP with --runtime facil", async () => {
   }
 });
 
-test("machine backend serves HTTP with --runtime facil", async () => {
+modelTest("machine backend serves HTTP with --runtime facil", async () => {
   const binary = await buildHttpBinary("machine", HTTP_SOURCE);
   const server = await startServer(binary);
   try {
@@ -111,7 +121,7 @@ function createServerSource(port: number, host = "127.0.0.1"): string {
     `server.listen(port, "${host}", () => {});\n`;
 }
 
-test("C backend serves custom response with http.createServer and server.listen", async () => {
+modelTest("C backend serves custom response with http.createServer and server.listen", async () => {
   const port = 18081;
   const binary = await buildHttpBinary("c", createServerSource(port));
   const server = await startServer(binary);
@@ -124,7 +134,7 @@ test("C backend serves custom response with http.createServer and server.listen"
   }
 });
 
-test("machine backend serves custom response with http.createServer and server.listen", async () => {
+modelTest("machine backend serves custom response with http.createServer and server.listen", async () => {
   const port = 18082;
   const binary = await buildHttpBinary("machine", createServerSource(port));
   const server = await startServer(binary);
@@ -137,7 +147,7 @@ test("machine backend serves custom response with http.createServer and server.l
   }
 });
 
-test("C backend serves a server bound to an IPv6 address", async () => {
+modelTest("C backend serves a server bound to an IPv6 address", async () => {
   const port = 18111;
   const binary = await buildHttpBinary("c", createServerSource(port, "::1"));
   const server = await startServer(binary);
@@ -150,7 +160,7 @@ test("C backend serves a server bound to an IPv6 address", async () => {
   }
 });
 
-test("machine backend serves a server bound to an IPv6 address", async () => {
+modelTest("machine backend serves a server bound to an IPv6 address", async () => {
   const port = 18112;
   const binary = await buildHttpBinary("machine", createServerSource(port, "::1"));
   const server = await startServer(binary);
@@ -163,7 +173,7 @@ test("machine backend serves a server bound to an IPv6 address", async () => {
   }
 });
 
-test("a server that names no address serves IPv4 and IPv6 alike", async () => {
+modelTest("a server that names no address serves IPv4 and IPv6 alike", async () => {
   const port = 18113;
   const binary = await buildHttpBinary("c", `const port = ${port};\nhttp.serve(port);\n`);
   const server = await startServer(binary);
@@ -187,7 +197,7 @@ function ipv6ClientSource(port: number): string {
     `req.end();\n`;
 }
 
-test("C backend asks a server at an IPv6 address", async () => {
+modelTest("C backend asks a server at an IPv6 address", async () => {
   const port = 18114;
   const server = await buildHttpBinary("c", createServerSource(port, "::1"));
   const running = await startServer(server);
@@ -223,7 +233,7 @@ function methodEchoServerSource(port: number): string {
     `server.listen(port, "127.0.0.1", () => {});\n`;
 }
 
-test("the synchronous fetch and http.request calls run against the source's toolchain", async () => {
+modelTest("the synchronous fetch and http.request calls run against the source's toolchain", async () => {
   const port = 18116;
   const server = await buildHttpBinary("c", methodEchoServerSource(port));
   const running = await startServer(server);
@@ -245,7 +255,7 @@ function echoServerSource(port: number): string {
     `server.listen(port, "127.0.0.1", () => {});\n`;
 }
 
-test("C backend echoes request body via req.text", async () => {
+modelTest("C backend echoes request body via req.text", async () => {
   const port = 18083;
   const binary = await buildHttpBinary("c", echoServerSource(port));
   const server = await startServer(binary);
@@ -263,7 +273,7 @@ test("C backend echoes request body via req.text", async () => {
   }
 });
 
-test("machine backend echoes request body via req.text", async () => {
+modelTest("machine backend echoes request body via req.text", async () => {
   const port = 18084;
   const binary = await buildHttpBinary("machine", echoServerSource(port));
   const server = await startServer(binary);
@@ -286,7 +296,7 @@ function resolved(source: string) {
   return resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
 }
 
-test("a response that ends with no body answers with the empty text", () => {
+modelTest("a response that ends with no body answers with the empty text", () => {
   // `res.end()` is the empty response a 204 is answered with. It used to take
   // exactly two arguments, so the form Node programs are written with was
   // refused for the body it did not write.
@@ -297,7 +307,7 @@ test("a response that ends with no body answers with the empty text", () => {
   assert.match(written, /blaze_http_resp_complete/, "the response is completed");
 });
 
-test("server.listen starts the event loop in the background and server.close stops the held server", () => {
+modelTest("server.listen starts the event loop in the background and server.close stops the held server", () => {
   const source = `const port = 18090;\n` +
     `const server = http.createServer((req, res) => { res.writeHead(200); res.end("closed\n"); });\n` +
     `server.listen(port, "127.0.0.1", () => { server.close(); });\n` +
@@ -308,7 +318,7 @@ test("server.listen starts the event loop in the background and server.close sto
   assert.match(written, /blaze_http_server_stop\(blaze_http_server_held\(\)\)/, "server.close stops the server the adapter holds");
 });
 
-test("server.listen hands the host it was given to the runtime", () => {
+modelTest("server.listen hands the host it was given to the runtime", () => {
   const source = `const port = 18115;\n` +
     `const server = http.createServer((req, res) => { res.writeHead(200); res.end("ok\\n"); });\n` +
     `server.listen(port, "::1", () => {});\n`;
@@ -320,13 +330,13 @@ test("server.listen hands the host it was given to the runtime", () => {
   );
 });
 
-test("http.request lowers to blaze_http_client_request", () => {
+modelTest("http.request lowers to blaze_http_client_request", () => {
   const source = `const body = http.request("http://127.0.0.1:8080/", "GET", "", "");\nconsole.log(body);\n`;
   const written = generateProgramDriver(resolved(source), true);
   assert.match(written, /blaze_http_client_request/, "http.request lowers to the client runtime call");
 });
 
-test("fetch lowers to blaze_http_client_request", () => {
+modelTest("fetch lowers to blaze_http_client_request", () => {
   const source = `const body = fetch("http://127.0.0.1:8080/", "GET", "", "");\nconsole.log(body);\n`;
   const written = generateProgramDriver(resolved(source), true);
   assert.match(written, /blaze_http_client_request/, "fetch lowers to the client runtime call");
@@ -344,7 +354,7 @@ function clientRequestSource(port: number): string {
     `req.end();\n`;
 }
 
-test("http.request in the callback form opens a buffered request", () => {
+modelTest("http.request in the callback form opens a buffered request", () => {
   const written = generateProgramDriver(resolved(clientRequestSource(18085)), true);
   assert.match(written, /blaze_http_client_open/, "the callback form opens a buffered request");
   assert.match(written, /blaze_http_client_method/, "the method the options name is written on the request");
@@ -364,7 +374,7 @@ function capturingClientSource(port: number): string {
     `req.end();\n`;
 }
 
-test("every value a client callback captured is carried to the callback", () => {
+modelTest("every value a client callback captured is carried to the callback", () => {
   // The adapter is handed the handler of a request and the values the handler
   // captured. It had room for one of them, so a callback that captured two was
   // given the first and read the second out of nothing.
@@ -386,7 +396,7 @@ test("every value a client callback captured is carried to the callback", () => 
   );
 });
 
-test("a server whose port is already held does not wait on a thread it never started", async () => {
+modelTest("a server whose port is already held does not wait on a thread it never started", async () => {
   // A program that cannot bind its port has no event loop to join. The thread
   // id it would have joined is the zero an unstarted thread is, and joining
   // that is a write through nothing: the second program crashed rather than
@@ -405,7 +415,7 @@ test("a server whose port is already held does not wait on a thread it never sta
   }
 });
 
-test("C backend answers a request made by a callback that captured two values", async () => {
+modelTest("C backend answers a request made by a callback that captured two values", async () => {
   const port = 18092;
   const server = await buildHttpBinary("c", createServerSource(port));
   const running = await startServer(server);
@@ -430,7 +440,7 @@ function numberCapturingClientSource(port: number): string {
     `req.end();\n`;
 }
 
-test("a number a callback captured is carried to it as the number it is", () => {
+modelTest("a number a callback captured is carried to it as the number it is", () => {
   // A capture used to be carried to the callback as a pointer, and a number
   // carried as a pointer is rounded to a whole number on the way: a callback
   // that captured 1.5 was given 1.
@@ -447,7 +457,7 @@ test("a number a callback captured is carried to it as the number it is", () => 
   );
 });
 
-test("C backend answers a request made by a callback that captured a number", async () => {
+modelTest("C backend answers a request made by a callback that captured a number", async () => {
   const port = 18094;
   const server = await buildHttpBinary("c", createServerSource(port));
   const running = await startServer(server);
@@ -462,7 +472,7 @@ test("C backend answers a request made by a callback that captured a number", as
   }
 });
 
-test("C backend answers a request made in the callback form", async () => {
+modelTest("C backend answers a request made in the callback form", async () => {
   const port = 18086;
   const server = await buildHttpBinary("c", createServerSource(port));
   const running = await startServer(server);
@@ -477,7 +487,7 @@ test("C backend answers a request made in the callback form", async () => {
   }
 });
 
-test("machine backend answers a request made in the callback form", async () => {
+modelTest("machine backend answers a request made in the callback form", async () => {
   const port = 18087;
   const server = await buildHttpBinary("machine", createServerSource(port));
   const running = await startServer(server);
@@ -492,7 +502,7 @@ test("machine backend answers a request made in the callback form", async () => 
   }
 });
 
-test("a request that cannot be made rejects the promise the executor holds", () => {
+modelTest("a request that cannot be made rejects the promise the executor holds", () => {
   const source = `const req = http.request("http://127.0.0.1:1/", { method: "GET" }, (res) => {\n` +
     `  res.on("error", (err) => { console.log("failed"); });\n` +
     `});\n` +
@@ -546,7 +556,7 @@ function bodyClientSource(port: number): string {
     `console.log(answer);\n`;
 }
 
-test("a string is handed to a function of a program and the request it makes is answered", async () => {
+modelTest("a string is handed to a function of a program and the request it makes is answered", async () => {
   const port = 18091;
   const server = await buildHttpBinary("c", bodyServerSource(port));
   const running = await startServer(server);
@@ -561,7 +571,7 @@ test("a string is handed to a function of a program and the request it makes is 
   }
 });
 
-test("the request a program makes carries the body it wrote", async () => {
+modelTest("the request a program makes carries the body it wrote", async () => {
   // The body of a request is written after the headers, and the headers end
   // where the length of the body begins: a blank line between them ends the
   // header block, and the server reads the length of the body as the body.
@@ -573,7 +583,7 @@ test("the request a program makes carries the body it wrote", async () => {
   assert.match(written, /blaze_http_client_end/, "the request is sent");
 });
 
-test("a build replaces a program that is still running", async () => {
+modelTest("a build replaces a program that is still running", async () => {
   // Rebuilding while the old binary serves is the usual way round, and the
   // file of a running program cannot be written: the copy a build delivered by
   // was refused by the machine itself, ETXTBSY, text file busy. The delivery

@@ -5,7 +5,7 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,6 +16,7 @@ import { resolveProgram } from "../semantics/ir-resolve.ts";
 import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
+import { skipWithoutModelKey } from "./model-endpoint.ts";
 
 const QUIET = () => {};
 
@@ -98,7 +99,16 @@ const server = http.createServer((req: any, res: any) => {
 server.listen(${PORT}, "127.0.0.1", () => {});
 `;
 
-test("a program routes on the path of the request", async () => {
+
+/** These builds ask a real model, which needs a credential in the environment. */
+const modelTest = (name: string, fn: (t: TestContext) => void | Promise<void>): void => {
+  test(name, async (t) => {
+    if (skipWithoutModelKey(t)) return;
+    await fn(t);
+  });
+};
+
+modelTest("a program routes on the path of the request", async () => {
   const binary = await buildBinary(ROUTING_SOURCE);
   const server = await startServer(binary, PORT);
   try {
@@ -110,7 +120,7 @@ test("a program routes on the path of the request", async () => {
   }
 });
 
-test("the headers a program sets are the headers the answer carries", async () => {
+modelTest("the headers a program sets are the headers the answer carries", async () => {
   const binary = await buildBinary(ROUTING_SOURCE);
   const server = await startServer(binary, PORT);
   try {
@@ -149,7 +159,7 @@ const server = http.createServer((req: any, res: any) => {
 server.listen(${PORT}, "127.0.0.1", () => {});
 `;
 
-test("a program publishes to an event stream and keeps the state it shares with its handler", async () => {
+modelTest("a program publishes to an event stream and keeps the state it shares with its handler", async () => {
   const binary = await buildBinary(STREAM_SOURCE);
   const server = await startServer(binary, PORT);
   try {
@@ -167,7 +177,7 @@ test("a program publishes to an event stream and keeps the state it shares with 
   }
 });
 
-test("the clock of a program is read twice and the two readings are two calls", () => {
+modelTest("the clock of a program is read twice and the two readings are two calls", () => {
   const source = `
 const first = performance.now();
 const second = performance.now();
@@ -191,7 +201,7 @@ console.log(second - first);
   assert.match(written, /double \w+ = blaze_rt_monotonic_ms\(\);/, "each reading is a value of its own");
 });
 
-test("a program that reads the path of a request is compiled with the path of the request", () => {
+modelTest("a program that reads the path of a request is compiled with the path of the request", () => {
   const source = `
 const server = http.createServer((req: any, res: any) => {
 	res.writeHead(200);
@@ -210,7 +220,7 @@ const server = http.createServer((req: any, res: any) => {
   assert.match(written, /blaze_http_req_path/, "the path of the request is read from the request");
 });
 
-test("a handler that shares the state of the program is given it", () => {
+modelTest("a handler that shares the state of the program is given it", () => {
   const source = `
 const state = new Float64Array(4);
 
@@ -233,7 +243,7 @@ const server = http.createServer((req: any, res: any) => {
   assert.match(written, /state/, "the state is the program's own");
 });
 
-test("a number a handler captured is held for it as the number it is", () => {
+modelTest("a number a handler captured is held for it as the number it is", () => {
   // The names a handler captured are held where the handler reads them, and a
   // number used to be held as an address — which is rounded to a whole number
   // on the way: a handler that captured 1.5 was given 1.

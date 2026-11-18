@@ -21,7 +21,7 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect, type Socket } from "node:net";
 import { readFile, writeFile } from "node:fs/promises";
@@ -30,6 +30,7 @@ import { runBuild } from "../compiler.ts";
 import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
+import { skipWithoutModelKey } from "./model-endpoint.ts";
 
 const QUIET = () => {};
 
@@ -166,7 +167,16 @@ async function runClient(client: string, server: RawServer): Promise<{ output: s
   return { output: answered.stdout.trim(), connections: after - before };
 }
 
-test("the client keeps one connection open between two requests", async () => {
+
+/** These builds ask a real model, which needs a credential in the environment. */
+const modelTest = (name: string, fn: (t: TestContext) => void | Promise<void>): void => {
+  test(name, async (t) => {
+    if (skipWithoutModelKey(t)) return;
+    await fn(t);
+  });
+};
+
+modelTest("the client keeps one connection open between two requests", async () => {
   const server = await startRawServer("keep-alive");
   try {
     const client = await buildClient(server.port, 3);
@@ -178,7 +188,7 @@ test("the client keeps one connection open between two requests", async () => {
   }
 });
 
-test("the client asks the server to keep the connection open", async () => {
+modelTest("the client asks the server to keep the connection open", async () => {
   const server = await startRawServer("keep-alive");
   try {
     const client = await buildClient(server.port, 1);
@@ -195,7 +205,7 @@ test("the client asks the server to keep the connection open", async () => {
   }
 });
 
-test("a server that ends the connection makes the client open a new one", async () => {
+modelTest("a server that ends the connection makes the client open a new one", async () => {
   const server = await startRawServer("close");
   try {
     const client = await buildClient(server.port, 3);
@@ -207,7 +217,7 @@ test("a server that ends the connection makes the client open a new one", async 
   }
 });
 
-test("the client reads a body that ends where the answer says it ends", async () => {
+modelTest("the client reads a body that ends where the answer says it ends", async () => {
   // The answer carries a body of one byte and then nothing at all: a client
   // that read until the connection ended would wait for an end that never
   // comes.
@@ -222,7 +232,7 @@ test("the client reads a body that ends where the answer says it ends", async ()
   }
 });
 
-test("the client reads an answer that is written in chunks", async () => {
+modelTest("the client reads an answer that is written in chunks", async () => {
   const server = await startRawServer("chunked");
   try {
     const client = await buildClient(server.port, 1);
@@ -285,7 +295,7 @@ function readAnswer(socket: Socket): Promise<string> {
   });
 }
 
-test("the server answers two requests over one connection", async () => {
+modelTest("the server answers two requests over one connection", async () => {
   const port = 18140;
   const binary = await buildProgram(`const port = ${port};\nhttp.serve(port);\n`);
   const server = spawn(binary, [], { stdio: ["ignore", "pipe", "inherit"] });
@@ -318,7 +328,7 @@ test("the server answers two requests over one connection", async () => {
   }
 });
 
-test("a program that closes its server does not wait for the event loop to tick", async () => {
+modelTest("a program that closes its server does not wait for the event loop to tick", async () => {
   // The event loop waits for an event before it looks at what it was asked to
   // do, and the thread that waits is not woken by a request on another thread:
   // it notices a stop when its wait is over. The adapter therefore writes to a

@@ -14,7 +14,7 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { spawn } from "node:child_process";
 import { writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -22,6 +22,7 @@ import { runBuild } from "../compiler.ts";
 import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
+import { skipWithoutModelKey } from "./model-endpoint.ts";
 
 const QUIET = () => {};
 
@@ -100,7 +101,16 @@ function serveSettingsSource(port: number): string {
     `http.serveSettings(port, 128, 1000000, 8192, 40, 1, 1);\n`;
 }
 
-test("C backend serves concurrent connections with http.serveSettings", async () => {
+
+/** These builds ask a real model, which needs a credential in the environment. */
+const modelTest = (name: string, fn: (t: TestContext) => void | Promise<void>): void => {
+  test(name, async (t) => {
+    if (skipWithoutModelKey(t)) return;
+    await fn(t);
+  });
+};
+
+modelTest("C backend serves concurrent connections with http.serveSettings", async () => {
   const port = 18100;
   const { path, directory } = await buildHttpBinary("c", serveSettingsSource(port));
   const server = await startServer(path, directory);
@@ -119,7 +129,7 @@ test("C backend serves concurrent connections with http.serveSettings", async ()
   }
 });
 
-test("machine backend serves concurrent connections with http.serveSettings", async () => {
+modelTest("machine backend serves concurrent connections with http.serveSettings", async () => {
   const port = 18101;
   const { path, directory } = await buildHttpBinary("machine", serveSettingsSource(port));
   const server = await startServer(path, directory);
@@ -142,7 +152,7 @@ function bodyLimitSource(port: number): string {
     `http.serveSettings(port, 128, 32, 8192, 40, 1, 1);\n`;
 }
 
-test("C backend rejects an oversized request body via max_body_size", async () => {
+modelTest("C backend rejects an oversized request body via max_body_size", async () => {
   const port = 18102;
   const { path, directory } = await buildHttpBinary("c", bodyLimitSource(port));
   const server = await startServer(path, directory);
@@ -161,7 +171,7 @@ test("C backend rejects an oversized request body via max_body_size", async () =
   }
 });
 
-test("machine backend rejects an oversized request body via max_body_size", async () => {
+modelTest("machine backend rejects an oversized request body via max_body_size", async () => {
   const port = 18103;
   const { path, directory } = await buildHttpBinary("machine", bodyLimitSource(port));
   const server = await startServer(path, directory);
@@ -191,7 +201,7 @@ function serveTlsSource(port: number): string {
     `http.serveTls(port, "cert.pem", "key.pem");\n`;
 }
 
-test("C backend serves HTTPS with http.serveTls", async () => {
+modelTest("C backend serves HTTPS with http.serveTls", async () => {
   const port = 18104;
   const directory = await scratch("blaze-http-facilities-c-tls-");
   await generateSelfSignedCerts(directory);
@@ -209,7 +219,7 @@ test("C backend serves HTTPS with http.serveTls", async () => {
   }
 });
 
-test("machine backend serves HTTPS with http.serveTls", async () => {
+modelTest("machine backend serves HTTPS with http.serveTls", async () => {
   const port = 18105;
   const directory = await scratch("blaze-http-facilities-machine-tls-");
   await generateSelfSignedCerts(directory);
@@ -234,7 +244,7 @@ function timeoutSource(port: number): string {
     `http.serveSettings(port, 128, 1000000, 8192, 1, 1, 1);\n`;
 }
 
-test("C backend starts with a configured connection timeout", async () => {
+modelTest("C backend starts with a configured connection timeout", async () => {
   const port = 18106;
   const { path, directory } = await buildHttpBinary("c", timeoutSource(port));
   const server = await startServer(path, directory);
@@ -247,7 +257,7 @@ test("C backend starts with a configured connection timeout", async () => {
   }
 });
 
-test("machine backend starts with a configured connection timeout", async () => {
+modelTest("machine backend starts with a configured connection timeout", async () => {
   const port = 18107;
   const { path, directory } = await buildHttpBinary("machine", timeoutSource(port));
   const server = await startServer(path, directory);
