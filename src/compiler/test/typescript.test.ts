@@ -4563,7 +4563,7 @@ test("an element a list's entries loop binds is the record its declaration names
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
   const ir = irOf("typescript", { "main.ts": `${source}widen([], 0, 1);\n` }, "main.ts", "widen");
   assert.match(ir, /new_object\[ref<Object1>\] Object1 at \[sub\[f64\]/, "the field the spread writes over is the written one");
-  assert.match(ir, /wide \[load_field\[bool\] local\[ref<any>\] fixup Object1 wide\]/, "the field the spread copies is read from the element");
+  assert.match(ir, /wide \[load_field\[bool\] local\[ref<Fixup__main>\] fixup Fixup__main wide\]/, "the field the spread copies is read from the element");
 });
 
 test("a value a map holds is the record its type names, so its fields and its spread are read", () => {

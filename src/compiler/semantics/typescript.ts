@@ -4686,7 +4686,10 @@ class TypeScriptParser {
       case "text":
         return TEXT_RESULT;
       case "list":
-        return { kind: "slice", of: this.typeExprOfShape((fieldOf(shape, "of") as ResolvedType)) };
+        // The name carried here is the record the list holds, where the
+        // annotation wrote one (`Field[]`). Pass it down so the element keeps
+        // the layout it was declared at instead of becoming an unshaped handle.
+        return { kind: "slice", of: this.typeExprOfShape((fieldOf(shape, "of") as ResolvedType), name) };
       case "absent":
         return NOTHING;
       case "ref":
@@ -8486,7 +8489,10 @@ class TypeScriptParser {
             break;
           }
         }
-        return this.typeExprOfShape(shape, end - from === 1 ? this.layoutRefName(head.text) : recordName === null ? null : this.layoutRefName(recordName));
+        const elementName = shape.kind === "list" && fieldOf(fieldOf(shape, "of"), "kind") === "record"
+          ? this.layoutRefName(head.text)
+          : recordName === null ? null : this.layoutRefName(recordName);
+        return this.typeExprOfShape(shape, end - from === 1 ? this.layoutRefName(head.text) : elementName);
       }
       if ((fieldOf(this.typeTable, "classes") as ReadonlySet<string>).has(head.text) && end - from === 1) return this.referenceTo(head.text);
     }
