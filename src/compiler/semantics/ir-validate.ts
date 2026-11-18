@@ -1557,7 +1557,7 @@ function typeProblems(context: Context, tree: Tree): string[] {
     if (statement.k === "set" && String(fieldOf(statement, "op")) === "=") {
       const slot = slots.get(String(fieldOf(statement, "name")));
       const declared = slot === undefined ? null : slotType(slot);
-      if (declared !== null && !wordHandle((fieldOf(statement, "value") as SemanticValue).type, declared) && !convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
+      if (declared !== null && !convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
         problems.push(`${prefix}"${String(fieldOf(statement, "name"))}" holds a ${typeText(declared)}, not a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
       }
       if (declared !== null) {
