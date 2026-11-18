@@ -1662,6 +1662,26 @@ test("a spread of a call is the record the call answered", async () => {
   }
 });
 
+test("a member of a file-qualified record keeps its declared type through a spread", () => {
+  // The record a call answers is named with its file's stem, which is not one
+  // of the generated layout names. A member read through that name takes its
+  // type from the declaration's layout, so the copy the spread writes keeps
+  // the number a number and the truth a truth rather than two untyped words.
+  const source = [
+    "interface Info { steps: number; region: boolean }",
+    "function info(n: number): Info { return { steps: n, region: false }; }",
+    "export function demo(): string {",
+    "  const made = { kind: `while`, ...info(3) };",
+    "  return `${made.kind} ${made.steps} ${made.region}`;",
+    "}",
+    "console.log(demo());",
+  ].join("\n");
+  const ir = irOf("typescript", { "main.ts": source }, "main.ts", "demo");
+  assert.match(ir, /field steps: f64/, "the copied number is laid out as a double");
+  assert.match(ir, /field region: bool/, "the copied truth is laid out as a truth");
+  assert.match(ir, /to_text \[load_field\[bool\].* region\]\]/, "the truth is printed as a truth");
+});
+
 test("an empty list beside a set is walked as the set is", async () => {
   // `values ?? []` and `c ? [] : values` are iterated: the empty list holds the
   // set's element, so both loops walk texts.

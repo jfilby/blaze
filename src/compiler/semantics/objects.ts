@@ -1867,14 +1867,23 @@ export function resolveObjects(
         callees,
         types.get(callerPath) ?? null,
         (layout, field) => {
-          for (const [key, name] of names) {
-            if (name !== layout) continue;
-            const shape = shapes.get(key);
-            if (shape === undefined) return null;
-            const known = shapeFields(shape).find((entry) => String(fieldOf(entry,"name")) === field);
-            return known === undefined ? null : fieldOf(known,"value") as Inferred;
+          // A declared record's layout is the authority on what its fields
+          // hold. Its name is the one the source wrote, qualified by the file
+          // that declared it, which need not be any `ObjectN` the generated
+          // name map holds: a member read through `ref<Info__main>` has to
+          // find the fields `Info`'s declaration laid out.
+          const declaredKey = declaredLayouts.get(layout);
+          let shape = declaredKey === undefined ? undefined : shapes.get(declaredKey);
+          if (shape === undefined) {
+            for (const [key, name] of names) {
+              if (name !== layout) continue;
+              shape = shapes.get(key);
+              break;
+            }
           }
-          return null;
+          if (shape === undefined) return null;
+          const known = shapeFields(shape).find((entry) => String(fieldOf(entry,"name")) === field);
+          return known === undefined ? null : fieldOf(known,"value") as Inferred;
         },
       );
       const statements = fieldOf(definition,"statements") as Statement[];
