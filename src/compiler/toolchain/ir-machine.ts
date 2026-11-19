@@ -6306,16 +6306,28 @@ class Machine {
     const array = this.slot(String(fieldOf(packed, "array")));
     // The registers names the rest of the function relies on are spoken for,
     // and so is the low half of every register the prologue spilled: a 512-bit
-    // write through one of them is a write to that name's value too.
-    const spoken = new Set<number>([...this.pinned.values(), ...this.pinnedVectors.map((saved) => fieldOf(saved, "register") as number)]);
-    const free = (register: number): boolean => !spoken.has(register);
+    // write through one of them is a write to that name's value too. The two
+    // files are numbered alike, so a pin of xmm6 is not a pin of the general
+    // register rsi: each register a name is pinned into belongs to the file its
+    // value's type says. Mixing them here left too few general registers to
+    // carry the base, the bound and the constant's address, and the packed form
+    // was given up for the scalar loop it was meant to replace.
+    const integerSpoken = new Set<number>(this.pinnedRegisters);
+    const vectorSpoken = new Set<number>(this.pinnedVectors.map((saved) => fieldOf(saved, "register") as number));
+    for (const [name, register] of this.pinned) {
+      const held = this.slots.get(this.names.read(name)) ?? this.slots.get(name);
+      if (held !== undefined && isFloatType(fieldOf(held, "type") as SemanticType)) vectorSpoken.add(register);
+      else integerSpoken.add(register);
+    }
+    const freeInteger = (register: number): boolean => !integerSpoken.has(register);
+    const freeVector = (register: number): boolean => !vectorSpoken.has(register);
     // The scratch the weight and step the slots are advanced with are written
     // through, which must be free too.
-    if (!free(XMM0) || !free(XMM1)) return false;
+    if (!freeVector(XMM0) || !freeVector(XMM1)) return false;
     // The whole-number registers the turns are written with: the counter's own
     // when the build pinned it to one, and three more for the array's base, the
     // bound and the address a constant vector is read through.
-    const integerFree = [RDI, RSI, R8, R9, R10, R11].filter(free);
+    const integerFree = [RDI, RSI, R8, R9, R10, R11].filter(freeInteger);
     const pinnedCounter = this.pinned.get(this.names.read(String(fieldOf(loop, "variable")))) ?? null;
     const counter = pinnedCounter ?? (integerFree.shift() ?? null);
     if (counter === null) return false;
@@ -6324,15 +6336,15 @@ class Machine {
     // The running sum is kept in a register of its own: the pinned one when the
     // build gave the accumulator one, and a free one otherwise.
     const accumulatorRegister =
-      String(fieldOf(accumulator, "register")) !== "null" ? fieldOf(accumulator, "register") as number : ([0, 1, 2, 3, 4, 5, 6, 7].find(free) ?? null);
+      String(fieldOf(accumulator, "register")) !== "null" ? fieldOf(accumulator, "register") as number : ([0, 1, 2, 3, 4, 5, 6, 7].find(freeVector) ?? null);
     if (accumulatorRegister === null) return false;
-    spoken.add(accumulatorRegister);
+    vectorSpoken.add(accumulatorRegister);
     // Four vector registers: where the eight quotients land, where the eight
     // divisors are built, and the weight and step broadcast to every lane.
     const vectors: number[] = [];
     for (let register = 0; register <= 15; register += 1) {
       if (vectors.length >= 4) break;
-      if (free(register)) vectors.push(register);
+      if (freeVector(register)) vectors.push(register);
     }
     if (vectors.length < 4) return false;
     const [quotient, divisors, weightVector, stepVector] = vectors;
