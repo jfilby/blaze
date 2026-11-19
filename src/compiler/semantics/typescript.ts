@@ -5273,14 +5273,23 @@ class TypeScriptParser {
    */
   private shapeOfNamedType(type: TypeExpr | null): ResolvedType | null {
     if (type === null || type.kind !== "ref" || type.name === undefined) return null;
-    try {
-      const shape = resolveTypeName(this.typeTable, type.name);
-      if (shape.kind === "any") this.notePendingType(type.name);
-      return shape;
-    } catch {
-      this.notePendingType(type.name);
-      return null;
+    // A reference written from a resolved signature names the declaration's
+    // layout, which carries the module's stem: `Input__main` and not `Input`.
+    // The type table holds the declaration under the bare name, so try both
+    // spellings before leaving the read without a shape.
+    const names = [type.name];
+    const bare = type.name.split("__")[0] as string;
+    if (bare !== type.name) names.push(bare);
+    for (const name of names) {
+      try {
+        const shape = resolveTypeName(this.typeTable, name);
+        if (shape.kind !== "any") return shape;
+      } catch {
+        // Try the next spelling of the name.
+      }
     }
+    this.notePendingType(type.name);
+    return null;
   }
 
   /**
