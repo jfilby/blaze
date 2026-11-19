@@ -11280,7 +11280,7 @@ class Machine {
     // value the callee reads from the wrong register.
     const shift = sret === null && !wideArguments ? 0 : 1;
     this.callSymbol(
-      String(fieldOf(signature, "symbol")),
+      String(fieldOf(signature, "symbol") ?? fieldOf(call, "callee")),
       args,
       returns,
       shift === 0 ? fresh : -1,
