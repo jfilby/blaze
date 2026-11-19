@@ -607,7 +607,7 @@ function builtinExpression(name: string, args: string[]): string {
     // The digest is the handle a text is carried in, and a call written where
     // a text is read takes the text the runtime holds out of it.
     case "blaze_rt_sha256_digest":
-      return `blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(blaze_value_from_dynamic(${args[0]}))))`;
+      return `blaze_rt_to_text(blaze_rt_sha256_digest(blaze_value_from_dynamic(${args[0]})))`;
     case "blaze_rt_is_array":
       return `blaze_rt_is_array(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_object_has_field":

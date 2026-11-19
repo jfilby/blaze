@@ -2269,6 +2269,10 @@ export const HANDLE_WRAPPER_SYMBOLS: readonly string[] = [
   "blaze_rt_to_text_from_handle",
   "blaze_rt_type_of_from_handle",
   "blaze_rt_object_has_field_from_handle",
+  "blaze_rt_sha256_digest_handle",
+  "blaze_rt_sha256_digest_text",
+  "blaze_rt_sha256_create_handle",
+  "blaze_rt_sha256_update_handle",
   "blaze_rt_box_u256_text",
   "blaze_rt_box_i256_text",
   "blaze_rt_unbox_u256_text",
@@ -2368,6 +2372,10 @@ typedef struct blaze_i256 {
 const HEADER_EPILOGUE = `
 extern BlazeValue blaze_current_promise;
 double blaze_rt_object_has_field_from_handle(double object, const char* field);
+double blaze_rt_sha256_digest_handle(double hasher);
+const char* blaze_rt_sha256_digest_text(double hasher);
+double blaze_rt_sha256_create_handle(void);
+double blaze_rt_sha256_update_handle(double hasher, const char* text);
 double blaze_rt_box_u256_text(const blaze_u256* value);
 double blaze_rt_box_i256_text(const blaze_i256* value);
 void blaze_rt_unbox_u256_text(double handle, blaze_u256* out);
@@ -9746,6 +9754,18 @@ const char* blaze_rt_type_of_from_handle(double handle) {
 }
 double blaze_rt_object_has_field_from_handle(double handle, const char* field) {
   return blaze_rt_object_has_field(blaze_pointer_of_handle(handle), field);
+}
+double blaze_rt_sha256_digest_handle(double hasher) {
+  return blaze_dynamic_from_value(blaze_rt_sha256_digest(blaze_value_from_dynamic(hasher)));
+}
+const char* blaze_rt_sha256_digest_text(double hasher) {
+  return blaze_rt_to_text(blaze_rt_sha256_digest(blaze_value_from_dynamic(hasher)));
+}
+double blaze_rt_sha256_create_handle(void) {
+  return blaze_dynamic_from_value(blaze_rt_sha256_create());
+}
+double blaze_rt_sha256_update_handle(double hasher, const char* text) {
+  return blaze_dynamic_from_value(blaze_rt_sha256_update(blaze_value_from_dynamic(hasher), text));
 }
 double blaze_rt_length_from_handle(double handle) {
   return blaze_rt_length(blaze_value_from_dynamic(handle));

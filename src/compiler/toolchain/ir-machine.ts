@@ -11599,7 +11599,7 @@ class Machine {
     if (callee === "blaze_rt_sha256_create") {
       // The hasher is a handle the runtime made and keeps: it answers the
       // double that names one, and the chain hands it back to the next call.
-      this.callSymbol("blaze_rt_sha256_create", [], NUMBER);
+      this.callSymbol("blaze_rt_sha256_create_handle", [], NUMBER);
       return;
     }
     if (callee === "blaze_rt_sha256_update" && args[0] !== undefined && args[1] !== undefined) {
@@ -11609,18 +11609,14 @@ class Machine {
       this.at(args[1], TEXT);
       const text = this.hold(TEXT, "blaze_hash_text");
       this.store(text);
-      this.callSymbol("blaze_rt_sha256_update", [hasher, text], NUMBER);
+      this.callSymbol("blaze_rt_sha256_update_handle", [hasher, text], NUMBER);
       return;
     }
     if (callee === "blaze_rt_sha256_digest" && argument !== undefined) {
       this.at(argument, NUMBER);
       const hasher = this.hold(NUMBER, "blaze_hasher");
       this.store(hasher);
-      this.callSymbol("blaze_rt_sha256_digest", [hasher], NUMBER);
-      // The runtime answers the hex digest as the handle a text is carried in,
-      // and the IR says the answer is a text: the answer is already in the
-      // register the unboxing takes it from.
-      this.runtime("_to_text");
+      this.callSymbol("blaze_rt_sha256_digest_text", [hasher], TEXT);
       return;
     }
     if (callee === "posix.dirname" && argument !== undefined) {
