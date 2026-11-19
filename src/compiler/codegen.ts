@@ -1492,6 +1492,10 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
 
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         const sequence = firstSequence + index * maxAttempts + attempt;
+        // A review can take minutes; say the compiler is waiting on one before
+        // the request goes out, so a build does not look stuck.
+        const reviewing = fieldOf(request, "onReview") as ((progress: ReviewProgress) => void) | undefined;
+        reviewing?.({ stage: "ir", candidate, candidates: maxCandidates, attempt, attempts: maxAttempts });
         const { review, durationNs } = await askFor(
           {
             stage: "ir",
@@ -1577,6 +1581,8 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   if (winner === undefined || artifact === null) {
     return { candidates, outcomes, selected, benchmarkVector, modelDurationNs };
   }
+  const targetReviewing = fieldOf(request, "onReview") as ((progress: ReviewProgress) => void) | undefined;
+  targetReviewing?.({ stage: "target", candidate: Number(fieldOf(winner, "candidate")), candidates: maxCandidates, attempt: 1, attempts: maxAttempts });
   const { review, durationNs } = await askFor(
     {
       stage: "target",
