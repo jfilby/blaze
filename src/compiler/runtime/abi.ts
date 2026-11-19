@@ -6752,8 +6752,12 @@ double blaze_rt_is_array(BlazeValue value) {
 const char* blaze_rt_type_of(BlazeValue value) {
   if (value.tag == BLAZE_VALUE_NUMBER) return "number";
   if (value.tag == BLAZE_VALUE_BOOLEAN) return "boolean";
+  // A null is an object in the language, and the typeof question must say so
+  // rather than falling through to the number the other non-handles answer.
+  if (value.tag == BLAZE_VALUE_NULL) return "object";
   if (value.tag != BLAZE_VALUE_HANDLE) return "number";
   if (value.kind == BLAZE_HANDLE_STRING) return "string";
+  if (value.kind == BLAZE_HANDLE_NIL) return "object";
   if (value.kind == BLAZE_HANDLE_RECORD || value.kind == BLAZE_HANDLE_DICTIONARY ||
       value.kind == BLAZE_HANDLE_ARRAY || value.kind == BLAZE_HANDLE_OBJECT) return "object";
   if (value.kind == BLAZE_HANDLE_NUMBER) return "number";
