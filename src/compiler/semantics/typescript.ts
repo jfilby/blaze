@@ -17989,6 +17989,27 @@ class TypeScriptParser {
    * site reads its arguments at.
    */
   private expressionFunctionType(value: Expression): FunctionType | null {
+    // A value declared at an interface but holding an instance of a class
+    // reaches a method by dynamic dispatch. A compiled object is its class's
+    // layout, which has no field the interface's method name would read, so a
+    // call through that name would jump to data. Refuse where the callee is
+    // read rather than deliver a program that crashes.
+    if (value.k === "member" && value.base.k === "ident") {
+      const declared = this.valueTypes.get(value.base.name);
+      const concrete = this.valueClasses.get(value.base.name);
+      if (
+        declared !== undefined && declared.kind === "ref" && declared.name !== undefined &&
+        concrete !== undefined && declared.name !== concrete &&
+        !declared.name.startsWith(`${concrete}__`) &&
+        this.methodOwner(concrete, String(fieldOf(value, "field")), false) !== null
+      ) {
+        this.report(
+          `calls ${String(fieldOf(value, "field"))}, which is not a field of any object the program lays out`,
+          "a method of a class is called as its function; a value held at a function type reads the field the object lays out",
+          this.peek(),
+        );
+      }
+    }
     const shape = this.shapeOf(value);
     if (shape === null || shape.kind !== "function") return null;
     return {

@@ -1748,11 +1748,6 @@ export function resolveObjects(
       if (String(fieldOf(resolved,"kind")) !== "record" || (fieldOf(resolved,"index") as ResolvedType | null) !== null) continue;
       const fields: { name: string; value: Inferred }[] = [];
       for (const [fieldName, field] of fieldOf(resolved,"fields") as ReadonlyMap<string, ResolvedField>) {
-        // A method a declared type writes is behaviour of the class that
-        // implements it, not a field an object of the type lays out. Laying one
-        // out lets a call through a value typed at the interface read a field
-        // the concrete class never wrote, which is a jump to data.
-        if (String(fieldOf(fieldOf(field,"type"),"kind")) === "function") continue;
         // A field the declaration names after another declaration holds that
         // declaration, not the unshaped reference a record erases to: the
         // layout names it, and a read of its fields is that layout's.
