@@ -246,6 +246,27 @@ export function planProbe(contract: FunctionContract, parsed: ParsedContract): P
       reason: `the parameter "${unbuildable.name}" is a reference to an object the contract does not lay out, so no input can be built for it`,
     };
   }
+  // A field the layout holds at an untyped reference is a value the probe can
+  // only build as zero — a text, a handle or a function the object will carry
+  // at run time. Where the body calls through such a field, a zero is a null
+  // address and the probe faults on a candidate that is sound for the values a
+  // caller actually hands it. There is no input from the contract that answers
+  // the question here, so leave the verdict to the program.
+  const uncallable = parameters.find((param) => {
+    if (param.type.kind !== "ref") return false;
+    const object = objects[String(fieldOf(param.type, "name"))];
+    if (object === undefined) return false;
+    return (fieldOf(object, "fields") as readonly { readonly type: string }[]).some((field) => {
+      const type = parseType(String(fieldOf(field, "type")));
+      return type.kind === "ref" && fieldOf(type, "of") === null && fieldOf(type, "name") === undefined;
+    });
+  });
+  if (uncallable !== undefined) {
+    return {
+      kind: "skip",
+      reason: `the parameter "${uncallable.name}" holds a field at an untyped reference, which the contract gives no value to call through`,
+    };
+  }
 
   const statements: string[] = [];
   const callArguments = parameters.flatMap((param) => {
