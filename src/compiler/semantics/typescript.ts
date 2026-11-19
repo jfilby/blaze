@@ -13517,6 +13517,7 @@ class TypeScriptParser {
                 }
                 writes.push({ field, from: held });
               }
+              at += 1;
             }
             if (usable && added.length > 0) {
               const initial = this.declaredValues.get(targetName);
