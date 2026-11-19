@@ -1827,20 +1827,18 @@ class FunctionEmitter {
         // A list handed to a use that reads a value the compiler cannot name is
         // the dynamic array of its elements: the block and the length its header
         // measures are boxed one element at a time, so the value is the list and
-        // not an empty array. Only a number and a text are elements a dynamic
-        // value can hold.
+        // not an empty array. A text or a truth is boxed as itself; every other
+        // element — a number, a reference, another list — is one eight-byte
+        // word, which is what the machine backend writes too. A reference is a
+        // handle whose bits are already the word the dynamic array holds.
         const element = elementTypeOf(fieldOf(value,"type"));
         const kind = element !== null && isTextType(element)
           ? 1
           : element !== null && isBoolean(element)
             ? 2
-            : element !== null && isNumber(element)
-              ? 0
-              : -1;
-        if (kind < 0) {
-          throw new CompilerError("SemanticIrError", "semantic-ir", `a ${typeText(fieldOf(value,"type"))} is handed to a use that reads a value the compiler cannot name`, "a dynamic value holds numbers and texts; a list of references has no dynamic form yet", "", "", "");
-        }
-        return `${RUNTIME_NAME}_box_sequence((const void*)(${written}), sizeof(${declaredType(element)}), (int64_t)${kind})`;
+            : 0;
+        const size = element !== null && String(fieldOf(element,"kind")) === "primitive" ? `sizeof(${declaredType(element)})` : "8";
+        return `${RUNTIME_NAME}_box_sequence((const void*)(${written}), ${size}, (int64_t)${kind})`;
       }
       if (String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined) return written;
       if (isReference(fieldOf(value,"type"))) return `blaze_value_ref((void*)(${written}))`;

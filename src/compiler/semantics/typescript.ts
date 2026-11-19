@@ -22387,6 +22387,17 @@ class TypeScriptParser {
     // element type the outer list can be built at. The inner list is the one
     // the use has not settled, and it reports itself once.
     if (element === null && run.length > 0) element = this.valueTypeOf(run[0] as Expression);
+    // `[key, value]` written without a use to shape it is a pair, not a block
+    // of one kind: its two cells can hold a text and a number. A block can hold
+    // one kind, so a mixed one is held as dynamic values instead, each boxed at
+    // the width it arrived at.
+    if (element !== null && run.length > 1) {
+      const first = this.valueTypeOf(run[0] as Expression);
+      if (run.some((one) => !sameResult(this.valueTypeOf(one), first))) {
+        element = ANY_TYPE;
+        elementShape = null;
+      }
+    }
     flush();
     // An empty list joins the empty list in front of it for the same reason a
     // list with elements does: the block it answers is its own, so a list a
@@ -23402,6 +23413,34 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     // `new Map(pairs)` where the list holds the pair records a map's entries
     // are: each entry writes its first field as the key and its second as the
     // value, in the order the list holds them.
+    // `const rows = [[\`a\`, 1], ...]; new Map(rows)` names a table the module
+    // wrote out. Its initializer is still in the file, so the entries can be
+    // read where they stand: the list holds two-element arrays, and each one
+    // is the key and value of one entry. Expanding them here writes the pairs
+    // where the map is built, rather than walking a value the program holds.
+    if (collection.kind === "map" && source.k === "call" && source.name.startsWith("__value_")) {
+      const name = source.name.slice("__value_".length);
+      const range = this.stateInitializers.get(name);
+      if (range !== undefined && this.allTokens[range.start]?.text === "[") {
+        const expanded = this.constantValue(name, { range: { start: range.start, end: range.end } });
+        const rows = expanded === null ? null : this.writtenListValues(expanded);
+        if (rows !== null && rows.length > 0) {
+          const entries: { key: Expression; value: Expression }[] = [];
+          let written = true;
+          for (const row of rows) {
+            const cells = this.writtenListValues(row);
+            if (cells === null || cells.length < 2) {
+              written = false;
+              break;
+            }
+            entries.push({ key: cells[0] as Expression, value: cells[1] as Expression });
+          }
+          if (written && entries.length > 0) {
+            return this.collectionPairsHelper(collection, entries, (fieldOf(view, "line") as number));
+          }
+        }
+      }
+    }
     const pairs = collection.kind === "map" ? this.shapeOf(source) : null;
     const pair = pairs !== null && pairs.kind === "list" ? pairs.of : null;
     if (collection.kind === "map" && pair !== null && pair.kind === "record" &&
