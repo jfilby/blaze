@@ -21519,6 +21519,27 @@ class TypeScriptParser {
       if (constant !== undefined && !this.parameterNames.has(token.text)) {
         const expanded = this.constantValue(token.text, (fieldOf(constant, "expression") as ConstantValue | undefined));
         if (expanded !== null) return expanded;
+        // An empty collection has no membership to expand, but a function that
+        // reads it still needs a value with the collection's shape: the module
+        // holds no getter for one it wrote as a constant. Reconstruct the empty
+        // dictionary with the shape the declaration gave it.
+        const keys = fieldOf(constant, "keys") as readonly string[] | undefined;
+        if (keys !== undefined && keys.length === 0) {
+          const collection = this.constantCollection(token.text) ?? {
+            kind: "map" as const,
+            key: TEXT_RESULT,
+            value: ANY_TYPE,
+          };
+          const empty: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] };
+          this.collectionExpressions.set(empty, collection);
+          this.expressionTypes.set(empty, NUMBER_RESULT);
+          this.expressionShapes.set(empty, {
+            kind: "record",
+            fields: new Map(),
+            index: this.shapeOfTypeExpr(collection.value),
+          });
+          return empty;
+        }
         // An object constant read whole is the literal the file wrote: a
         // compiled function has no module scope to read the name from, so the
         // fields are written where the name is read. A field whose value is
