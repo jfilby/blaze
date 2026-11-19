@@ -2266,6 +2266,7 @@ export const HANDLE_WRAPPER_SYMBOLS: readonly string[] = [
   "blaze_rt_object_set_ref_from_handle",
   "blaze_rt_object_set_text_from_handle",
   "blaze_rt_to_text_from_handle",
+  "blaze_rt_type_of_from_handle",
 ];
 export const RUNTIME_SYMBOLS: Record<string, true> = runtimeSymbolTable();
 
@@ -8061,9 +8062,14 @@ static const char* blaze_text_of_value(const BlazeValue* value, const char* oper
   if (value->tag != BLAZE_VALUE_HANDLE || value->kind != BLAZE_HANDLE_STRING) return NULL;
   blaze_rt_entry* entry = blaze_registry_get(value, BLAZE_HANDLE_STRING, operation);
   if (entry == NULL || entry->pointer == NULL) return NULL;
+  // A string a program boxed is a dynamic value behind a handle, while one the
+  // runtime allocated is registered by its pointer. Ownership alone does not
+  // tell them apart: a boxed value is external too.
+  const double payload = blaze_dyn_untagged(*value);
+  blaze_dyn* boxed = blaze_dyn_lookup(payload);
+  if (boxed != NULL && boxed->kind == BLAZE_DYN_TEXT) return boxed->text != NULL ? boxed->text : "";
   if (entry->ownership == BLAZE_ENTRY_EXTERNAL || blaze_pointer_find(entry->pointer) != 0) return (const char*)entry->pointer;
-  blaze_dyn* boxed = (blaze_dyn*)entry->pointer;
-  return boxed->text != NULL ? boxed->text : "";
+  return NULL;
 }
 
 BlazeValue blaze_rt_json_parse(BlazeValue text) {
@@ -9700,6 +9706,9 @@ double blaze_rt_dict_delete_from_handle(double handle, const char* key) {
 }
 const char* blaze_rt_to_text_from_handle(double handle) {
   return blaze_rt_to_text(blaze_value_from_dynamic(handle));
+}
+const char* blaze_rt_type_of_from_handle(double handle) {
+  return blaze_rt_type_of(blaze_value_from_dynamic(handle));
 }
 double blaze_rt_length_from_handle(double handle) {
   return blaze_rt_length(blaze_value_from_dynamic(handle));

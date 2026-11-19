@@ -11667,7 +11667,7 @@ class Machine {
       // value goes down as the handle or the number it is, and the runtime
       // answers the text that names its kind.
       const value = this.dynamicArgument(argument);
-      this.callSymbol("blaze_rt_type_of", [value], TEXT);
+      this.callSymbol("blaze_rt_type_of_from_handle", [value], TEXT);
       return;
     }
     if (callee === SHARED) {
