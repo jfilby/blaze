@@ -611,6 +611,8 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_is_array(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_object_has_field":
       return `${RUNTIME_NAME}_object_has_field((const void*)(uintptr_t)(${args[0]}), ${args[1]})`;
+    case "blaze_rt_object_has_field_from_handle":
+      return `${RUNTIME_NAME}_object_has_field_from_handle(${args[0]}, ${args[1]})`;
     case "blaze_rt_date_iso":
       return `blaze_rt_date_iso(${args[0]})`;
     case "blaze_rt_array_length":

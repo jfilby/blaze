@@ -186,6 +186,8 @@ function builtinTable(): Map<string, BuiltinSignature> {
    *  object carries the names its layout wrote. */
   "blaze_rt_object_has_field", { params: [POINTER, TEXT], returns: F64, arity: 2 });
 
+  table.set("blaze_rt_object_has_field_from_handle", { params: [F64, TEXT], returns: F64, arity: 2 });
+
   table.set("blaze_rt_dict_len", { params: [F64], returns: F64, arity: 1 });
 
   table.set("blaze_rt_dict_key_at", { params: [F64, F64], returns: TEXT, arity: 2 });

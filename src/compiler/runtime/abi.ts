@@ -1600,6 +1600,7 @@ entry(
     "Returns 1 or 0. An object that was never described, and a value that is not a managed pointer, answer 0.",
     { tags: ["object"] },
   ),
+
   entry(
     "blaze_rt_arguments_set",
     "void",
@@ -2267,6 +2268,7 @@ export const HANDLE_WRAPPER_SYMBOLS: readonly string[] = [
   "blaze_rt_object_set_text_from_handle",
   "blaze_rt_to_text_from_handle",
   "blaze_rt_type_of_from_handle",
+  "blaze_rt_object_has_field_from_handle",
 ];
 export const RUNTIME_SYMBOLS: Record<string, true> = runtimeSymbolTable();
 
@@ -2361,6 +2363,7 @@ typedef struct blaze_i256 {
 
 const HEADER_EPILOGUE = `
 extern BlazeValue blaze_current_promise;
+double blaze_rt_object_has_field_from_handle(double object, const char* field);
 #endif
 `;
 
@@ -9709,6 +9712,9 @@ const char* blaze_rt_to_text_from_handle(double handle) {
 }
 const char* blaze_rt_type_of_from_handle(double handle) {
   return blaze_rt_type_of(blaze_value_from_dynamic(handle));
+}
+double blaze_rt_object_has_field_from_handle(double handle, const char* field) {
+  return blaze_rt_object_has_field(blaze_pointer_of_handle(handle), field);
 }
 double blaze_rt_length_from_handle(double handle) {
   return blaze_rt_length(blaze_value_from_dynamic(handle));

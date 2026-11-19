@@ -12257,7 +12257,7 @@ class TypeScriptParser {
       const asked: Expression = {
         k: "binary",
         op: "===",
-        left: { k: "call", name: "blaze_rt_object_has_field", args: [object, key] },
+        left: { k: "call", name: "blaze_rt_object_has_field_from_handle", args: [object, key] },
         right: { k: "literal", text: "1" },
       };
       this.expressionTypes.set(asked, BOOLEAN_RESULT);
