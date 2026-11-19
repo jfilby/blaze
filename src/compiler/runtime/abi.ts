@@ -2269,6 +2269,10 @@ export const HANDLE_WRAPPER_SYMBOLS: readonly string[] = [
   "blaze_rt_to_text_from_handle",
   "blaze_rt_type_of_from_handle",
   "blaze_rt_object_has_field_from_handle",
+  "blaze_rt_box_u256_text",
+  "blaze_rt_box_i256_text",
+  "blaze_rt_unbox_u256_text",
+  "blaze_rt_unbox_i256_text",
 ];
 export const RUNTIME_SYMBOLS: Record<string, true> = runtimeSymbolTable();
 
@@ -2364,6 +2368,10 @@ typedef struct blaze_i256 {
 const HEADER_EPILOGUE = `
 extern BlazeValue blaze_current_promise;
 double blaze_rt_object_has_field_from_handle(double object, const char* field);
+double blaze_rt_box_u256_text(const blaze_u256* value);
+double blaze_rt_box_i256_text(const blaze_i256* value);
+void blaze_rt_unbox_u256_text(double handle, blaze_u256* out);
+void blaze_rt_unbox_i256_text(double handle, blaze_i256* out);
 #endif
 `;
 
@@ -9709,6 +9717,29 @@ double blaze_rt_dict_delete_from_handle(double handle, const char* key) {
 }
 const char* blaze_rt_to_text_from_handle(double handle) {
   return blaze_rt_to_text(blaze_value_from_dynamic(handle));
+}
+/* A wide number as a boxed text, so a module cell can hold it the way it holds
+   every other value: the decimal the kernel writes is the text the state cell
+   keeps, and reading it back parses the same digits into the four limbs. */
+double blaze_rt_box_u256_text(const blaze_u256* value) {
+  unsigned char text[80];
+  size_t written = blaze_rt_u256_format(value, 10u, text, sizeof text - 1u);
+  text[written] = '\\0';
+  return blaze_rt_box_string((const char*)text);
+}
+double blaze_rt_box_i256_text(const blaze_i256* value) {
+  unsigned char text[80];
+  size_t written = blaze_rt_i256_format(value, 10u, text, sizeof text - 1u);
+  text[written] = '\\0';
+  return blaze_rt_box_string((const char*)text);
+}
+void blaze_rt_unbox_u256_text(double handle, blaze_u256* out) {
+  const char* text = blaze_rt_to_text_from_handle(handle);
+  if (text != NULL) blaze_rt_u256_parse(out, text, strlen(text));
+}
+void blaze_rt_unbox_i256_text(double handle, blaze_i256* out) {
+  const char* text = blaze_rt_to_text_from_handle(handle);
+  if (text != NULL) blaze_rt_i256_parse(out, text, strlen(text));
 }
 const char* blaze_rt_type_of_from_handle(double handle) {
   return blaze_rt_type_of(blaze_value_from_dynamic(handle));

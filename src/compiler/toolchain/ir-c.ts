@@ -37,6 +37,7 @@ import {
   isWideType,
   isTextType,
   isSequence,  slotType,
+  statementBlocksOf,
   valueKind,
   type CaptureRef,
   type SemanticBlock,
@@ -770,6 +771,8 @@ class FunctionEmitter {
   private temporaries = 0;
   private arrayParamLengths = new Map<string, string>();
   private arrayLocals = new Set<string>();
+  /** The declared type of each name, for a read whose use erases it to `any`. */
+  private readonly localTypes = new Map<string, SemanticType>();
   /** Set once a whole number is written out, which is what the helper is for. */
   private wholeNumbers = false;
   /** Set once the body builds or reads a closure, which is what the types are for. */
@@ -779,7 +782,19 @@ class FunctionEmitter {
     this.fn = fn;
   }
 
+  /** Remember what each name was declared as, including nested blocks. */
+  private collectLocalTypes(block: SemanticBlock): void {
+    for (const statement of block.statements as readonly SemanticStatement[]) {
+      if (String(fieldOf(statement, "k")) === "let") {
+        const slot = fieldOf(statement, "slot") as SemanticSlot;
+        this.localTypes.set(String(fieldOf(slot, "name")), slotType(slot));
+      }
+      for (const nested of statementBlocksOf(statement)) this.collectLocalTypes(nested);
+    }
+  }
+
   emit(): string {
+    this.collectLocalTypes(fieldOf(this.fn, "entry") as SemanticBlock);
     // Parameters are the scope the body reads its arguments from, bound before
     // anything is written so a body that shadows one writes a second name.
     const parameters: string[] = [];
@@ -1383,13 +1398,30 @@ class FunctionEmitter {
       // a text, a handle or a number. The type the read states says which of
       // them the bits are, and a pointer is cast back from the address.
       const held = fieldOf(call,"returns");
+      const stored = `blaze_dynamic_from_value(${RUNTIME_NAME}_state_get(${args[0]}))`;
+      // A wide number is four limbs, not one word, so the cell keeps its
+      // decimal text: read the handle out and parse the digits back into the
+      // limbs the rest of the body works on.
+      if (isWideType(held)) {
+        const tmp = this.temporary("blaze_wide_state");
+        const wide = String(fieldOf(held,"name")) === "i256" ? "blaze_i256" : "blaze_u256";
+        const unbox = String(fieldOf(held,"name")) === "i256" ? `${RUNTIME_NAME}_unbox_i256_text` : `${RUNTIME_NAME}_unbox_u256_text`;
+        return `({ ${wide} ${tmp}; ${unbox}(${stored}, &${tmp}); ${tmp}; })`;
+      }
       const pointer = String(fieldOf(held,"kind")) === "text" || String(fieldOf(held,"kind")) === "slice" || String(fieldOf(held,"kind")) === "array" || String(fieldOf(held,"kind")) === "ptr"
         || (String(fieldOf(held,"kind")) === "ref" && !(fieldOf(held,"of") === null && fieldOf(held,"name") === undefined));
-      const stored = `blaze_dynamic_from_value(${RUNTIME_NAME}_state_get(${args[0]}))`;
       return pointer ? `((${declaredType(held)})(uintptr_t)(${stored}))` : stored;
     }
     if (String(fieldOf(call,"callee")) === "blaze_rt_state_set") {
       const held = (fieldOf(call,"argTypes") as SemanticType[])[1] ?? fieldOf((fieldOf(call,"args") as SemanticValue[])[1] ?? {}, "type") ?? null;
+      // The wide value is a struct expression, so it is bound to a name before
+      // its address is taken and its decimal text is boxed into the cell.
+      if (held !== null && isWideType(held)) {
+        const tmp = this.temporary("blaze_wide_state");
+        const wide = String(fieldOf(held,"name")) === "i256" ? "blaze_i256" : "blaze_u256";
+        const box = String(fieldOf(held,"name")) === "i256" ? `${RUNTIME_NAME}_box_i256_text` : `${RUNTIME_NAME}_box_u256_text`;
+        return `({ ${wide} ${tmp} = ${args[1]}; blaze_dynamic_from_value(${RUNTIME_NAME}_state_set(${args[0]}, blaze_value_from_dynamic(${box}(&${tmp})))); })`;
+      }
       const pointer = held !== null && (String(fieldOf(held,"kind")) === "text" || String(fieldOf(held,"kind")) === "slice" || String(fieldOf(held,"kind")) === "array" || String(fieldOf(held,"kind")) === "ptr"
         || (String(fieldOf(held,"kind")) === "ref" && !(fieldOf(held,"of") === null && fieldOf(held,"name") === undefined)));
       return `blaze_dynamic_from_value(${RUNTIME_NAME}_state_set(${args[0]}, blaze_value_from_dynamic(${pointer ? args[1] : args[1] ?? "0.0"})))`;
@@ -1819,6 +1851,22 @@ class FunctionEmitter {
       return `(${written}, ${asAny ? `${RUNTIME_NAME}_box_null()` : absenceOf(as)})`;
     }
     if (asAny) {
+      // A name a cell holds is declared at its own width even where the use
+      // erases it to an untyped reference — a call inlined into a module getter
+      // leaves the wide value under a name whose read says `ref<any>`. The
+      // declaration is what says how the value is carried.
+      const carried = String(fieldOf(value, "k")) === "local"
+        ? this.localTypes.get(String(fieldOf(value, "name"))) ?? fieldOf(value, "type") as SemanticType
+        : fieldOf(value, "type") as SemanticType;
+      if (isWideType(carried)) {
+        // A wide number is four limbs and not the one word the number boxer
+        // takes. Its decimal text is the handle a dynamic value holds, which is
+        // also what a module cell keeps for it.
+        const tmp = this.temporary("blaze_wide_box");
+        const wide = String(fieldOf(carried,"name")) === "i256" ? "blaze_i256" : "blaze_u256";
+        const box = String(fieldOf(carried,"name")) === "i256" ? `${RUNTIME_NAME}_box_i256_text` : `${RUNTIME_NAME}_box_u256_text`;
+        return `({ ${wide} ${tmp} = ${written}; ${box}(&${tmp}); })`;
+      }
       if (isTextType(fieldOf(value,"type")) || String(fieldOf(value,"k")) === "text") {
         return `${RUNTIME_NAME}_box_string(${written})`;
       }

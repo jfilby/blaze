@@ -224,6 +224,12 @@ function widePairProblem(left: SemanticValue, right: SemanticValue, result: Sema
   }
   if (isWideType(left.type) && (isWideType(right.type) || wholeLiteral(right))) return null;
   if (isWideType(right.type) && wholeLiteral(left)) return null;
+  // Both sides are whole literals the compiler read, so each is widened to the
+  // width the kernel takes, the way a single literal beside a wide number is.
+  // Inlining a wide function called with two small bigint literals substitutes
+  // both into its body, leaving exactly this shape for the backends, which
+  // widen a const literal into all four limbs where they read a wide operand.
+  if (wholeLiteral(left) && wholeLiteral(right)) return null;
   const narrow = isWideType(left.type) ? right.type : left.type;
   const wide = isWideType(left.type) ? left.type : right.type;
   return `a ${typeText(narrow)} is computed with a ${typeText(wide)}, and the kernel every backend answers a wide number with is over two of them`;
