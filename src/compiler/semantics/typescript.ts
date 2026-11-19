@@ -18635,8 +18635,8 @@ class TypeScriptParser {
     // A whole number of sixty-four bits is written a byte at a time from its
     // own digits, which is what a mask and a shift of a `bigint` are; a number
     // is written from the double, where the shift is a division.
-    const whole = held.kind === "primitive" && (held.name === "i64" || held.name === "u64");
-    const key = JSON.stringify(["viewStore", width, whole]);
+    const whole = held.kind === "primitive" && (held.name === "i64" || held.name === "u64" || held.name === "u256" || held.name === "i256");
+    const key = JSON.stringify(["viewStore", width, whole, held]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known.name;
     const name = `__view_${this.stem}_${this.collectCount}`;
@@ -18644,7 +18644,7 @@ class TypeScriptParser {
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const shift = (places: number): Expression => whole
-      ? { k: "bigint", text: `${BigInt(2 ** (places * 8))}n` }
+      ? { k: "bigint", text: `${places * 8}n` }
       : number(String(2 ** (places * 8)));
     const at = (offset: number): Expression => offset === 0
       ? ident("at")
@@ -18658,12 +18658,13 @@ class TypeScriptParser {
         ? { k: "binary", op: ">>", left: byte, right: shift(index) }
         : { k: "binary", op: "/", left: byte, right: shift(index) };
       if (width > 1) byte = { k: "binary", op: "&", left: byte, right: whole ? { k: "bigint", text: "255n" } : number("255") };
+      if (held.kind === "primitive" && (held.name === "u256" || held.name === "i256")) byte = { k: "call", name: "Number", args: [byte] };
       body.push({ kind: "indexAssign", buffer: "target", index: at(index), op: "=", value: byte, line });
     }
     const params = [
       { name: "target", type: { kind: "slice", of: BYTE } as TypeExpr },
       { name: "at", type: NUMBER_RESULT },
-      { name: "value", type: whole ? BIGINT_RESULT : NUMBER_RESULT },
+      { name: "value", type: whole ? held : NUMBER_RESULT },
     ];
     const helper: TypeScriptFunction = { name, params, returns: NOTHING, body, line, closure: true };
     this.closures.push({ name, exported: false, internal: true, params, returns: NOTHING, handle: helper });
