@@ -5691,8 +5691,27 @@ class ProgramLowering {
     this.leave();
     if (entry.terminator.k === "next") entry.terminator = { k: "return", value: null };
     const functionsOut: FunctionSignature[] = [];
-    for (const one of fieldOf(program, "functions") as readonly FunctionSignature[]) functionsOut.push(one);
-    for (const draft of settled) functionsOut.push(fieldOf(draft, "signature") as FunctionSignature);
+    const signaturesBySymbol = new Map<string, FunctionSignature>();
+    for (const one of fieldOf(program, "functions") as readonly FunctionSignature[]) {
+      functionsOut.push(one);
+      signaturesBySymbol.set(String(fieldOf(one, "symbol")), one);
+    }
+    for (const draft of settled) {
+      const signature = fieldOf(draft, "signature") as FunctionSignature;
+      const symbol = String(fieldOf(signature, "symbol"));
+      // The contract names a function by what the source declared, while a
+      // body that lifts a module value into a parameter settles a wider
+      // signature under the same name. Keeping both left a call checked
+      // against the stale one: replace it with the resolved signature.
+      const prior = signaturesBySymbol.get(symbol);
+      if (prior === undefined) {
+        signaturesBySymbol.set(symbol, signature);
+        functionsOut.push(signature);
+      } else {
+        functionsOut[functionsOut.indexOf(prior)] = signature;
+        signaturesBySymbol.set(symbol, signature);
+      }
+    }
     const extraFunctionsOut: { name: string; body: string }[] = [];
     for (const one of trampolines) extraFunctionsOut.push(one);
     for (const one of callbacks) extraFunctionsOut.push(one);
