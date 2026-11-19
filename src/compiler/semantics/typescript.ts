@@ -7926,6 +7926,14 @@ class TypeScriptParser {
         if (mapped === null) {
           if (fallback !== undefined) {
             mapped = defaultParameterType(fallback);
+            // A default that reads a field of a module value is a member, which
+            // the spelling-based rule above leaves untyped. The field's own
+            // recorded type says what it holds: a bigint field is a wide
+            // number in the arithmetic the body goes on to write with it.
+            if (mapped.kind === "ref" && mapped.of === null) {
+              const held = this.valueTypeOf(fallback);
+              if (held.kind === "primitive" && (held.name === "u256" || held.name === "i64")) mapped = WIDE_RESULT;
+            }
           } else if (this.entryFile) {
             // The entry of a program hands an untyped parameter to the program
             // parser, which types it by the calls the program makes.

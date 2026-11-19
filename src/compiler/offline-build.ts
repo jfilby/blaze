@@ -37,7 +37,7 @@ import { printSemanticProgram } from "./semantics/ir-text.ts";
 import { semanticFunctionOutcome, validateSemanticProgram } from "./semantics/ir-validate.ts";
 import { semanticContext } from "./semantics/semantic-context.ts";
 import { inlineCalls, type RepairContext } from "./semantics/repair.ts";
-import { buildObject as buildMachineObject } from "./toolchain/ir-machine.ts";
+import { buildObject as buildMachineObject, machineRefusal } from "./toolchain/ir-machine.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { programLoweringOf } from "./compiler.ts";
 import { buildStandaloneRuntime } from "./runtime/standalone.ts";
@@ -161,6 +161,12 @@ async function main(): Promise<void> {
         for (const error of outcome.errors) console.error(`  ${name}: ${error.message}`);
         throw new Error(`${name} did not validate`);
       }
+      // A function the machine backend cannot lower — a holder of a closure,
+      // say — is kept as C by an ordinary build. This benchmark builds only
+      // machine objects, so skip such a function: the bodies that called it
+      // were inlined earlier, and nothing the program runs reaches it.
+      const refusal = machineRefusal({ fn: lowered, contract, callable, target });
+      if (refusal !== null) continue;
       const result = await buildMachineObject({
         fn: lowered,
         contract,
