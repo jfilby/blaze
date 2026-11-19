@@ -1827,6 +1827,19 @@ export function blaze_rt_type_of(address) {
   if (value.tag === ${VALUE_TAGS.number} || value.kind === ${HANDLE_KINDS.number}) return makeText("number");
   if (value.tag === ${VALUE_TAGS.boolean} || value.kind === ${HANDLE_KINDS.boolean}) return makeText("boolean");
   if (value.kind === ${HANDLE_KINDS.string}) return makeText("string");
+  if (value.tag === ${VALUE_TAGS.handle}) {
+    const boxed = dynLookup(value.payload);
+    // A parse read answers a handle whose static kind is the document it came
+    // from, not the kind of the value it parsed to. Ask the value itself, the
+    // way the C runtime asks the dynamic handle's kind, so the typeof question
+    // on a parsed string answers "string" rather than "object".
+    if (boxed !== null && boxed.kind === "value") {
+      const inner = boxed.value;
+      if (typeof inner === "string") return makeText("string");
+      if (typeof inner === "number") return makeText("number");
+      if (typeof inner === "boolean") return makeText("boolean");
+    }
+  }
   return makeText("object");
 }
 `,
