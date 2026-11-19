@@ -3001,7 +3001,11 @@ class Machine {
   private reserveBoundRegisters(taken: ReadonlySet<number>): number[] {
     const deepest = this.boundDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0);
     if (deepest === 0) return [];
-    const free = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].filter((register) => !taken.has(register));
+    // A bound is held across every call the loop body makes, so only a
+    // callee-saved register can hold one. A caller-saved register the prologue
+    // pushed is still free for a callee to overwrite; when none of these is
+    // left the bound goes in the frame instead.
+    const free = [12, 13, 14, 15].filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - deepest, 0));
   }
 
