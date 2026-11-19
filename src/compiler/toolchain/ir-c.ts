@@ -1435,9 +1435,12 @@ class FunctionEmitter {
       }
       const held = (fieldOf(call,"argTypes") as SemanticType[])[0];
       const dynamic = held === undefined || String(fieldOf(held,"kind")) !== "ref" || (fieldOf(held,"of") === null && fieldOf(held,"name") === undefined);
-      return dynamic
-        ? `blaze_dynamic_from_value(${RUNTIME_NAME}_clone(${args[0]}))`
-        : `((void*)(uintptr_t)${RUNTIME_NAME}_clone(${args[0]}))`;
+      // The clone service takes and answers a tagged value, not the pointer or
+      // bare handle this body carries. Box the source into a handle the service
+      // reads and unbox its answer into the kind of value the copy is held at.
+      const source = dynamic ? args[0] : `blaze_value_ref((void*)(uintptr_t)(${args[0]}))`;
+      const copied = `blaze_dynamic_from_value(${RUNTIME_NAME}_clone(blaze_value_from_dynamic(${source})))`;
+      return dynamic ? copied : `blaze_pointer_of_handle(${copied})`;
     }
     if (String(fieldOf(call,"callee")) === ARGV_LENGTH) return `${RUNTIME_NAME}_argv_count()`;
     if (String(fieldOf(call,"callee")) === "u256_from_u64x2") {
