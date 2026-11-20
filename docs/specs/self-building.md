@@ -348,6 +348,10 @@ methods among them — and the fixes have small regressions in
 - a function that reads a module value stays with the module — module values are
   reached through their getters, including a numeric cell — so the object pass
   can call it from the program;
+- an object returned at a declared type lays out its optional fields, so two
+  literals of one interface are one layout and a read through an unshaped
+  reference has one offset; an object with no fields is still a byte, since a
+  contract names every layout a backend has to allocate;
 - a generator is read as the list it yields: `yield` writes one element,
   `yield*` writes every element the delegated list holds, and `Generator<T>`
   states the element type the caller walks. The JSON store's batched writes
@@ -358,7 +362,7 @@ shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear. A self-build now passes the contract phase and fails
-in the IR: `ProgramLowering_value` reads `ref<any>.awaiting`, which two layouts
-could each hold. What remains is that keyed read, the later spec slices, and the
-fixed point test. Fixed point is not reached yet.
+The frontend gate is clear. A self-build now passes the contract phase and most
+IR lowering, and fails where an unshaped reference reads a field many layouts
+hold (`ref<any>.parts`). What remains is a keyed read for that case, the later
+spec slices, and the fixed point test. Fixed point is not reached yet.

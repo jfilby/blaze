@@ -22312,6 +22312,19 @@ class TypeScriptParser {
       padded.push({ name: "__arm", value: armValue });
       return { k: "object", fields: padded, written: [...written.keys()] };
     }
+    // An optional field of the declared record is laid out whether or not the
+    // literal wrote it: the zero of its type is the absence the source meant.
+    // Two literals that write the same declared type are then one layout, so a
+    // read of a field through an unshaped reference to it has one offset.
+    if (expected !== null && expected.index === null && (fieldOf(expected, "arms") as ResolvedType[] | undefined) === undefined) {
+      const written = new Set(fieldSlot[0].map((field) => String(fieldOf(field, "name"))));
+      const padded = fieldSlot[0].slice();
+      for (const [name, declared] of (fieldOf(expected, "fields") as Map<string, ResolvedField>)) {
+        if (fieldOf(declared, "optional") !== true || written.has(name)) continue;
+        padded.push({ name, value: this.zeroFor(this.typeExprOfShape(declared.type)) });
+      }
+      if (padded.length !== fieldSlot[0].length) return { k: "object", fields: padded, written: [...written] };
+    }
     return { k: "object", fields: fieldSlot[0] };
   }
 

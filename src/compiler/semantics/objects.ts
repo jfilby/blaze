@@ -2219,5 +2219,8 @@ export function layOut(
     fields.push({ name: String(fieldOf(field,"name")), type: typeToString(type), offset });
     offset += size;
   }
-  return { name, size: alignUp(offset, align), align, fields };
+  // An object that writes no field still occupies a byte: a contract names
+  // every layout it holds, and a zero-sized layout is one no backend can
+  // allocate or pass as a reference.
+  return { name, size: Math.max(alignUp(offset, align), 1), align, fields };
 }

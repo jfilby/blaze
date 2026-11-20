@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { phaseOf, semanticsOf } from "./phase.ts";
+import { phaseOf, programOf, semanticsOf } from "./phase.ts";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { readTypeScriptModule } from "../semantics/typescript.ts";
 
@@ -129,6 +129,37 @@ test("instanceof a built-in collection reads for a value the type does not name"
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
   const { fn, contract } = resolved(source, "tag");
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
+});
+
+test("an object returned at a declared type lays out its optional fields", () => {
+  // Two literals that write the same declared interface must be one layout,
+  // even where one leaves an optional field out: a read of that field through
+  // an unshaped reference then has one offset to choose.
+  const source = [
+    "interface Call { name: string; grid?: number; awaiting?: boolean }",
+    "export function a(): Call { return { name: `a`, grid: 1, awaiting: true }; }",
+    "export function b(): Call { return { name: `b` }; }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  for (const name of ["a", "b"]) {
+    const fn = read.analysis.functions.find((one) => one.name === name);
+    const handle = fn?.handle as { body?: { value?: { fields?: { name: string }[] } }[] } | undefined;
+    const fields = (handle?.body?.[0]?.value?.fields ?? []).map((field) => field.name);
+    assert.deepEqual(fields, ["name", "grid", "awaiting"], `${name} writes every declared field`);
+  }
+});
+
+test("an object with no fields still has a size", () => {
+  // Every layout a contract holds is allocated by a backend, so an empty
+  // object is a byte rather than a zero-sized layout no backend can pass.
+  const program = programOf("typescript", { "1.ts": "function f(): any { const empty = {}; return empty; }\nmain();\n" }, "1.ts");
+  const objects = program.files[0]?.functions["f"]?.definition.objects ?? {};
+  assert.ok(Object.values(objects).length > 0, "the empty object has a layout");
+  for (const layout of Object.values(objects)) {
+    assert.ok(Number(layout.size) > 0, "the layout can be allocated");
+  }
 });
 
 test("a field of globalThis reads through its host service", () => {
