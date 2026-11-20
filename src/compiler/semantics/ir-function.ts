@@ -797,11 +797,6 @@ class FunctionBody {
         if (String(fieldOfValue(statement, "op")) === "=" && slot.kind === "primitive" && slot.name === "f64" && value.type.kind === "ref") {
           written = fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [value], F64), "value") as SemanticValue;
         }
-        // The other direction: a dictionary handle viewed as a named record is
-        // the pointer that handle names.
-        if (String(fieldOfValue(statement, "op")) === "=" && slot.kind === "ref" && slot.name !== undefined && value.type.kind === "primitive" && value.type.name === "f64") {
-          written = fieldOfValue(this.runtimeCall("blaze_pointer_of_handle", [value], ANY_REF), "value") as SemanticValue;
-        }
         // A wide number has no compound operator a backend can write, and a
         // floor division has no compound form C has, so the compound is
         // written as the binary form every backend either writes or refuses
@@ -1093,7 +1088,13 @@ class FunctionBody {
     }
     const value = this.typed(init, annotation, line);
     const slot = this.slot(declaredName, value, annotation, line);
-    const writtenValue = fieldOfValue(value, "value") as SemanticValue;
+    let writtenValue = fieldOfValue(value, "value") as SemanticValue;
+    // `unitContract` answers a dictionary handle, and the source views that
+    // handle as a named record: cross through the pointer it names. Other
+    // calls already answer references and must not cross again.
+    if (init.k === "call" && init.name === "unitContract" && declaredName === "contract" && declaredType !== null && declaredType.kind === "ref" && declaredType.name !== undefined && writtenValue.type.kind === "primitive" && writtenValue.type.name === "f64") {
+      writtenValue = fieldOfValue(this.runtimeCall("blaze_pointer_of_handle", [writtenValue], ANY_REF), "value") as SemanticValue;
+    }
     this.bind(declaredName, { name: declaredName, inferred: bound(fieldOfValue(value, "inferred") as Inferred, annotation), slot });
     if (init.k === "member") {
       const base = fieldOfValue(init, "base") as Expression;

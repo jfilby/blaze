@@ -240,6 +240,24 @@ test("a rest function type is called at the arity the source wrote", () => {
   arityOf(handle?.body ?? []);
 });
 
+test("a dictionary handle viewed as a named record crosses at the declare", () => {
+  // The contract pass reads the result of `unitContract` as a dictionary
+  // handle; viewing it as a named record crosses through the pointer it names.
+  const source = [
+    "interface Contract { name: string }",
+    "function unitContract(unit: unknown): Record<string, unknown> { return {}; }",
+    "export function demo(): string {",
+    "  const contract = unitContract(1) as unknown as Contract;",
+    "  return contract.name;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the declare resolves");
+});
+
 test("a cast of a call result does not cross a reference to a pointer", () => {
   const source = [
     "interface T { name: string }",
