@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
+import { readTypeScriptModule } from "../semantics/typescript.ts";
 
 /** Contracts and resolves a program, returning the IR of one function. */
 function resolved(source: string, name: string) {
@@ -55,5 +56,41 @@ test("a dynamic value is read as a truth beside a boolean", () => {
     "}",
   ].join("\n");
   const { fn, contract } = resolved(source, "probe");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), []);
+});
+
+test("a member read through a cast keeps the field's type", () => {
+  // A cast to a declared type names its layout (`Piece__module`), while the
+  // declaration is held under the bare name. The field a member read takes
+  // from that layout used to be lost, so `Array.from` over a text field was
+  // refused where the compiler source writes it.
+  const source = [
+    "interface Piece { value: string }",
+    "interface Box { parts: Piece[] }",
+    "function letters(box: Box): string[] {",
+    "  return Array.from((box.parts[0] as { value: string }).value);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "letters");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), []);
+});
+
+test("a conditional spread writes a field the expected type does not state", () => {
+  // `...(rest ? { rest: true } : {})` writes a field the descriptor's type does
+  // not declare. The arm that writes nothing leaves that type's zero, which is
+  // taken from the value the written arm gives it.
+  const source = [
+    "interface Param { name: string; type: number }",
+    "function make(rest: boolean): Param[] {",
+    '  return [{ name: "x", type: 1, ...(rest ? { rest: true as const } : {}) }];',
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "make");
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });

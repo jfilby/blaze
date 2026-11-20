@@ -4897,7 +4897,16 @@ class TypeScriptParser {
         // a method written on it waits for that link rather than being refused
         // here.
         if (base !== null) {
-          const field = fieldOfType(this.typeTable, base, String(fieldOf(value, "field")));
+          const name = String(fieldOf(value, "field"));
+          let field = fieldOfType(this.typeTable, base, name);
+          // A cast names a declared type by its layout name (`Piece__main`),
+          // while the declaration is held under the bare name. The field a
+          // member reads is the one the declaration wrote, so try that name
+          // where the layout name is not one this table declares.
+          if (field === null && base.kind === "ref" && base.name !== null) {
+            const bare = base.name.split("__")[0] as string;
+            if (bare !== base.name) field = fieldOfType(this.typeTable, { ...base, name: bare }, name);
+          }
           if (field !== null) {
             shape = field.type;
             if (this.fieldWaitsForLink(field)) {
@@ -21719,14 +21728,22 @@ class TypeScriptParser {
     const writtenFields = fieldOf(written, "fields") as { name: string; value: Expression; }[];
     const fields = names.map((name) => writtenFields.find((field: WrittenField) => field.name === name)).filter((field) => field !== undefined);
     const expectedFields = fieldOf(expected, "fields") as Map<string, ResolvedField>;
+    // A field the expected type does not write is typed by the value the arm
+    // gives it: the arm that writes nothing leaves that type's zero. A value
+    // whose type is not held cannot say which zero it leaves, and the spread
+    // stays refused rather than guessing one.
+    const typed: { field: { name: string; value: Expression }; type: ResolvedType }[] = [];
     for (const field of fields) {
       const declared = expectedFields.get(field.name);
-      if (declared === undefined || this.absenceExpression(declared.type) === null) return false;
+      const type = declared !== undefined
+        ? declared.type
+        : (this.shapeOf(field.value) ?? this.shapeOfTypeExpr(this.valueTypeOf(field.value)));
+      if (type === null || type.kind === "any" || this.absenceExpression(type) === null) return false;
+      typed.push({ field, type });
     }
-    for (const field of fields) {
-      const declared = expectedFields.get(field.name) as ResolvedField;
-      this.applyExpected(field.value, this.typeExprOfShape(declared.type), this.shapeForRead(declared.type));
-      const absent = this.absenceExpression(declared.type) as Expression;
+    for (const { field, type } of typed) {
+      this.applyExpected(field.value, this.typeExprOfShape(type), this.shapeForRead(type));
+      const absent = this.absenceExpression(type) as Expression;
       put(field.name, {
         k: "conditional",
         condition: conditional.condition,

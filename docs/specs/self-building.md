@@ -47,8 +47,8 @@ or one language capability that the rung below it does not need.
 
 ## Where the source stands
 
-The measured tree is 107 compiler sources. The frontend reads 99 of them whole
-and refuses 13 constructs in the remaining 8, so `test/self-host.test.ts` does
+The measured tree is 107 compiler sources. The frontend reads 104 of them whole
+and refuses 6 constructs in the remaining 3, so `test/self-host.test.ts` does
 not pass yet; those refusals are the current queue for rung 4 (see "The current
 refusals" and "Where the self-build stands"). The sources are already written
 as **erasable TypeScript**: `erasableSyntaxOnly` is on in
@@ -156,31 +156,26 @@ come from `test/self-host-gap.ts`.
 
 - An `instanceof` that names a class of the module, and `in` over a value whose
   fields the type does not write down (`core/structural-hash.ts`, 3).
-- A method call whose receiver's type does not state the method: `admit`
-  (`codegen.ts`), `prelude` (`toolchain/program-emit.ts`), `resolveImport`
-  (`semantics/module-graph.ts`) and `validate` (`toolchain/wasm.ts`, 4).
-- `Array.from` over a length description, a text or a list, and an object
-  spread over a constant object (`semantics/typescript.ts`, 2).
-- A constructor value called where the type states a constructor
-  (`toolchain/wasm.ts`, 1).
 - `function*` and `yield*` (`core/json-store.ts`, 2): a generator is not yet
   part of a program.
 - A map whose values are `slice<text>` indexed by a key
   (`semantics/ir-validate.ts`, 1).
 
 The earlier blockers on this queue have landed: `BigInt(text)`, the wraps and
-signed comparisons in the contract evaluator, `Number(bigint)` and
-`structuredClone`. They are described under "Where the self-build stands" and
-have small regressions in `test/self-build-regressions.test.ts`.
+signed comparisons in the contract evaluator, `Number(bigint)`,
+`structuredClone`, and the frontend reads that let `Array.from`, a member read
+through a cast and a conditional object spread resolve. They are described
+under "Where the self-build stands" and have small regressions in
+`test/self-build-regressions.test.ts`.
 
 ## The next slices
 
 In the order they block rung 4:
 
-1. **The current refusals.** The 13 constructs listed above, spread over the
-   frontend, the contract evaluator and the wasm backend. They stop the
-   compiler from reading all the functions in its own module graph, so nothing
-   past them can be measured by a self-build.
+1. **The current refusals.** The 6 constructs listed above, in the structural
+   hash, the JSON store and the IR validator. They stop the compiler from
+   reading all the functions in its own module graph, so nothing past them can
+   be measured by a self-build.
 2. **An object the file returns whole.** A compiled function cannot read a
    module object by name; the literal at the name is the use, but inlining it
    must not stop the constant tables (a membership question, a bracket read,
@@ -289,8 +284,8 @@ binary is made of.
 
 ## Where the self-build stands
 
-The gap report currently reads 99 of 107 compiler sources whole and refuses 13
-constructs in the other 8, so `test/self-host.test.ts` fails; the tests and
+The gap report currently reads 104 of 107 compiler sources whole and refuses 6
+constructs in the other 3, so `test/self-host.test.ts` fails; the tests and
 benchmarks are outside the binary. The contract and IR phases read the functions
 that used to stop a self-build — `verifyCandidate` and the wasm backend's `Body`
 methods among them — and the fixes have small regressions in
@@ -342,11 +337,17 @@ methods among them — and the fixes have small regressions in
   decimal text;
 - module state cells lower in the machine backend, whole-number results keep
   their exact value and sign across the boundary, and the wasm backend names a
-  parsed value's kind and decodes listing opcodes by their hex spelling.
+  parsed value's kind and decodes listing opcodes by their hex spelling;
+- a member read through a cast to a declared type keeps the field's type: the
+  layout name a cast carries is read down to the declaration the type table
+  holds, so `Array.from` over a text field resolves where the compiler writes
+  it;
+- a conditional object spread writes a field the expected type does not state,
+  taking that field's zero from the value the written arm gives it.
 
 The object layout pass and the C driver build: both read their statements,
 shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The whole-tree gate is the 13 refusals above; fixed point is not reached yet.
+The whole-tree gate is the 6 refusals above; fixed point is not reached yet.
