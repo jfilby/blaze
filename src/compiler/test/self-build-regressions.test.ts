@@ -131,6 +131,21 @@ test("instanceof a built-in collection reads for a value the type does not name"
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });
 
+test("a function reading a module collection stays a function of the module", () => {
+  // A map the module writes is read through its getter, which a compiled
+  // function can call. A function that reads it is not one the running program
+  // holds as a name, so it stays with the module rather than its program body.
+  const source = [
+    "const tags = new Map<string, string>();",
+    "function add(key: string, value: string): void { tags.set(key, value); }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  assert.ok(read.analysis.functions.some((fn) => fn.name === "add"), "the reader is a module function");
+  assert.equal(read.analysis.body.length, 0, "a library module has no program body");
+});
+
 test("a non-exported generator is a function of the module", () => {
   // A library module has no program body: a function written after `function*`
   // must be prescanned as the module's function, not left as top-level code.

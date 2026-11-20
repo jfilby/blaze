@@ -7323,6 +7323,10 @@ class TypeScriptParser {
     // writes; it is not state the program body has to hold for it.
     const moduleState = new Set(this.state);
     for (const name of this.numericGlobals.keys()) moduleState.delete(name);
+    // A map or a set the module writes is read through its getter, which a
+    // compiled function can call: it is the module's value, not one the program
+    // holds as a name. A function that reads it stays a function of the module.
+    for (const name of this.constantCollections.keys()) moduleState.delete(name);
     const readsProgramState = entries.length > 0 && entries.some((entry) => readsState(fieldOf(entry, "handle") as TypeScriptFunction, moduleState));
     const refused = trial.entries.length > 0;
     // An exported function is the module's interface. Handing it to the program
