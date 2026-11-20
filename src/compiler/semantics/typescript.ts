@@ -15075,7 +15075,7 @@ class TypeScriptParser {
         // value is read at, so it is kept beside the value: `"k" in n` asks the
         // dictionary the assertion named rather than the `unknown` the
         // declaration wrote.
-        if (!dynamicObject && assertion === "as" && shape !== null && (shape.kind === "record" || shape.kind === "list" || shape.kind === "map" || shape.kind === "set")) {
+        if (!dynamicObject && assertion === "as" && shape !== null && (shape.kind === "record" || shape.kind === "list" || shape.kind === "map" || shape.kind === "set" || shape.kind === "function")) {
           this.expressionShapes.set(current(), shape);
         }
         // `m.get(k) as Set<string>` names a collection the value already is: a
@@ -15109,6 +15109,10 @@ class TypeScriptParser {
         if (type.kind === "ref" && type.name !== undefined && unknownReference(assertedFrom) && !alreadyPointer) {
           const resolved: Expression = { k: "call", name: "blaze_pointer_of_handle", args: [current()] };
           this.expressionTypes.set(resolved, type);
+          // The assertion named the layout the value holds: carry its shape
+          // onto the pointer read, so a field of it keeps the type the source
+          // wrote even though the handle was crossed to a pointer here.
+          if (shape !== null) this.expressionShapes.set(resolved, shape);
           replace(resolved);
         }
         continue;

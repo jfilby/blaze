@@ -131,6 +131,26 @@ test("instanceof a built-in collection reads for a value the type does not name"
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });
 
+test("a callback read through a cast is called through the value", () => {
+  // The target review callback is read off an opaque request with a cast to a
+  // function type. The cast's shape has to survive the handle-to-pointer read,
+  // so an optional call of the local is an `invoke` of the value and not a call
+  // of a function the program does not compile.
+  const source = [
+    "interface Progress { stage: string }",
+    "export function review(request: unknown): void {",
+    "  const notify = (request as { onReview?: ((progress: Progress) => void) }).onReview;",
+    '  notify?.({ stage: "target" });',
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "review");
+  const body = JSON.stringify(fn?.handle?.body ?? []);
+  assert.match(body, /"k":"invoke"/, "the callback is called through its value");
+});
+
 test("a function reading a module collection stays a function of the module", () => {
   // A map the module writes is read through its getter, which a compiled
   // function can call. A function that reads it is not one the running program
