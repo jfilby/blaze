@@ -2124,6 +2124,34 @@ test("a map of lists holds each list whole, with its length", async () => {
   }
 });
 
+test("a generator answers the list its yields write", async () => {
+  // A generator is read as the list it yields: one `yield` writes an element,
+  // `yield*` writes every element the delegated list holds, and the caller
+  // walks that list with for..of.
+  const source = [
+    "export function demo(): string {",
+    "  const parts: string[] = [];",
+    "  for (const part of chunks()) parts.push(part);",
+    '  return parts.join(",");',
+    "}",
+    "function* chunks(): Generator<string> {",
+    '  yield "a";',
+    "  yield* more();",
+    '  yield "d";',
+    "}",
+    "function* more(): Generator<string> {",
+    '  yield "b";',
+    '  yield "c";',
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "a,b,c,d", `the ${backend} backend walks a generator's list`);
+  }
+});
+
 test("a map with reference keys holds each list whole", async () => {
   // A weak map in the compiler's own sources is keyed by an object and holds a
   // list of names. The reference key is the address the handle carries, and the

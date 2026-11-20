@@ -100,7 +100,7 @@ import type {
   ProgramValue,
 } from "./module.ts";
 import type { Diagnostics, Token } from "./typescript.ts";
-import { ARGV_LENGTH, REFUSED_KEYWORDS, closingBrace, nextInterpolation, refusedKeyword, tokenize, unescape } from "./typescript.ts";
+import { ARGV_LENGTH, closingBrace, nextInterpolation, refusedKeyword, tokenize, unescape } from "./typescript.ts";
 import { builtinFor, MATH_NAMES } from "./builtins.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 import {
@@ -333,6 +333,8 @@ class ProgramParser {
    * block of the reader's making.
    */
   private pending: ProgramStatement[] = [];
+  /** Names the local lists a generator lowering writes. */
+  private generatorCount = 0;
   /** The class whose method is being read, or null in the program body. */
   private currentClass: ClassInfo | null = null;
 
@@ -728,6 +730,13 @@ class ProgramParser {
     if (this.at("do")) return this.doWhileLoop();
     if (this.at("for")) return this.countedLoop();
     if (this.at("switch")) return this.switchStatement();
+    if (this.at("yield")) {
+      this.next();
+      const all = this.accept("*");
+      const value = this.value();
+      this.accept(";");
+      return { kind: "invoke", function: all ? "__yieldAll" : "__yield", args: [value], line };
+    }
     if (this.at("process") && this.peek(1).text === "." ) {
       const written = this.processWrite();
       if (written !== undefined) return written;
@@ -798,7 +807,9 @@ class ProgramParser {
     }
     if (this.at("return")) {
       this.next();
-      const value = this.value();
+      // A bare `return` hands back nothing, which a generator lowering reads as
+      // the list the yields built.
+      const value = this.at(";") ? { k: "null" as const } : this.value();
       this.accept(";");
       return { kind: "result", value, line };
     }
@@ -1300,6 +1311,50 @@ class ProgramParser {
   }
 
   /**
+   * A generator is read as the list it yields. A `yield` writes one element to
+   * a local list, a `yield*` writes every element the delegated list holds, and
+   * a `return` answers that list.
+   */
+  private lowerGenerator(body: readonly ProgramStatement[], line: number): ProgramStatement[] {
+    const out = `__yielded${this.generatorCount++}`;
+    const push = (value: ProgramValue, at: number): ProgramStatement => ({
+      kind: "invoke", function: "array.push", args: [{ k: "name", name: out }, value], line: at,
+    });
+    const rewrite = (ones: readonly ProgramStatement[]): ProgramStatement[] => {
+      const written: ProgramStatement[] = [];
+      for (const statement of ones) {
+        if (statement.kind === "invoke" && (statement.function === "__yield" || statement.function === "__yieldAll")) {
+          const arg = statement.args[0] ?? { k: "null" };
+          if (statement.function === "__yield") written.push(push(arg, statement.line));
+          else {
+            const held = `__yieldFrom${this.generatorCount++}`;
+            const item = `__yieldItem${this.generatorCount++}`;
+            written.push({ kind: "declare", name: held, mutable: false, type: null, value: arg, line: statement.line });
+            written.push({ kind: "forOf", variable: item, of: held, body: [push({ k: "name", name: item }, statement.line)], line: statement.line });
+          }
+          continue;
+        }
+        if (statement.kind === "result") {
+          written.push({ kind: "result", value: { k: "name", name: out }, line: statement.line });
+          continue;
+        }
+        const copy = { ...statement } as Record<string, unknown>;
+        for (const key of ["body", "then", "otherwise", "catchBody", "finallyBody"]) {
+          const nested = fieldOf(copy, key);
+          if (Array.isArray(nested)) copy[key] = rewrite(nested as ProgramStatement[]);
+        }
+        written.push(copy as unknown as ProgramStatement);
+      }
+      return written;
+    };
+    const rewritten = rewrite(body);
+    const first: ProgramStatement = { kind: "declare", name: out, mutable: false, type: null, value: { k: "words", values: [] }, line };
+    const last: ProgramStatement = { kind: "result", value: { k: "name", name: out }, line };
+    const ended = rewritten.length > 0 && rewritten[rewritten.length - 1]?.kind === "result";
+    return [first, ...rewritten, ...(ended ? [] : [last])];
+  }
+
+  /**
    * `function f(n: number) { ... }`: a function the program declares, which
    * runs when it is called. A program declares a function where it writes it,
    * inside another function as well as at the top of the program, and what it
@@ -1308,15 +1363,8 @@ class ProgramParser {
   private declaredFunction(isAsync = false): ProgramStatement {
     const line = this.peek().line;
     this.expect("function");
-    // `function* name()`: the star is where the generator was written, and it
-    // is refused here rather than reported as the missing name of a function
-    // the source did write.
-    if (this.at("*")) {
-      const star = this.next();
-      this.fail("a generator is not part of a program", star, REFUSED_KEYWORDS.yield);
-      this.skipBlock();
-      return { kind: "invoke", function: "", args: [], line };
-    }
+    // `function* name()`: the star says the function yields a list of values.
+    const isGenerator = this.accept("*");
     const name = this.identifier("the name of a function");
     const params: ProgramParameter[] = [];
     const previous = new Map(this.valueClasses);
@@ -1352,7 +1400,8 @@ class ProgramParser {
     if (this.accept(":")) this.annotation("the type a function returns");
     const body = this.at("{") ? this.braces() : this.statements();
     this.valueClasses = previous;
-    return { kind: "function", name, params, body, line, ...(isAsync ? { async: true } : {}) };
+    const lowered = isGenerator ? this.lowerGenerator(body, line) : body;
+    return { kind: "function", name, params, body: lowered, line, ...(isAsync ? { async: true } : {}) };
   }
 
   /**
@@ -1892,10 +1941,24 @@ class ProgramParser {
       // `x instanceof C` asks whether the value is there as an instance of a
       // class. A compiled instance is the object itself, so the answer is
       // whether the reference is one at all.
+      if (level === 7 && token.kind === "ident" && token.text === "in") {
+        // A list holds exactly the indexes it wrote, so `index in list` is the
+        // bounds question over the list's length.
+        this.next();
+        const collection = this.binary(level + 1);
+        left = {
+          k: "binary",
+          op: "&&",
+          left: { k: "binary", op: ">=", left, right: { k: "number", text: "0" } },
+          right: { k: "binary", op: "<", left, right: { k: "lengthOf", of: collection } },
+        };
+        continue;
+      }
       if (level === 7 && token.kind === "ident" && token.text === "instanceof") {
         this.next();
         const name = this.identifier("the name of a class");
-        if (!classTableHas(this.classTable, name) && name !== "Error") {
+        const builtin = ["Error", "Date", "String", "Number", "Boolean", "Map", "Set", "WeakMap", "WeakSet"].includes(name);
+        if (!classTableHas(this.classTable, name) && !builtin) {
           this.fail(`instanceof names a class of this module, not "${name}"`, token);
         }
         const held = this.classOfValue(left);
@@ -2530,8 +2593,9 @@ class ProgramParser {
     }
     if (token.kind === "ident" && token.text === "yield") {
       this.next();
-      this.fail(`"${token.text}" is not part of a program`, token, refusedKeyword(token.text));
-      return this.value();
+      const all = this.accept("*");
+      const value = this.value();
+      return { k: "call", function: all ? "__yieldAll" : "__yield", args: [value] };
     }
     if (token.kind === "ident" && token.text === "function") {
       this.next();
@@ -2672,6 +2736,15 @@ class ProgramParser {
         this.next();
         this.next();
         return this.argv("Deno.args");
+      }
+      if (token.text === "Array" && this.peek(1).text === "." && this.peek(2).text === "isArray") {
+        this.next();
+        this.next();
+        this.next();
+        this.accept("(");
+        const value = this.value();
+        this.expect(")");
+        return { k: "call", function: "blaze_rt_is_array", args: [value] };
       }
       if (token.text === "Math" && this.peek(1).text === ".") return this.math();
       if (fieldOf(VIEWS, String(fieldOf(token, "text"))) !== undefined && String(fieldOf(this.peek(1), "text")) === ".") return this.viewWidth(token);

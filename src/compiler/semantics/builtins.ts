@@ -140,9 +140,9 @@ function builtinTable(): Map<string, BuiltinSignature> {
 
   table.set("blaze_rt_dict_get_seq_numkey", { params: [F64, F64], returns: ANY, arity: 2 });
 
-  table.set("blaze_rt_dict_set_seq_refkey", { params: [F64, F64, POINTER, F64, F64], returns: F64, arity: 5 });
+  table.set("blaze_rt_dict_set_seq_refkey", { params: [F64, ANY, POINTER, F64, F64], returns: F64, arity: 5 });
 
-  table.set("blaze_rt_dict_get_seq_refkey", { params: [F64, F64], returns: ANY, arity: 2 });
+  table.set("blaze_rt_dict_get_seq_refkey", { params: [F64, ANY], returns: ANY, arity: 2 });
 
   table.set("blaze_rt_dict_set_ref", { params: [F64, TEXT, ANY], returns: F64, arity: 3 });
 

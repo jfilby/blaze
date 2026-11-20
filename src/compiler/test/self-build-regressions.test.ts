@@ -131,6 +131,26 @@ test("instanceof a built-in collection reads for a value the type does not name"
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });
 
+test("a generator reads as the list its yields write", () => {
+  // The JSON store walks a value in bounded batches with `yield` and `yield*`.
+  // A generator is read as the list it yields, so the `Generator<string>` a
+  // function states is the list a caller walks with for..of.
+  const source = [
+    "function* chunks(): Generator<string> {",
+    '  yield "a";',
+    "  yield* more();",
+    "}",
+    "function* more(): Generator<string> {",
+    '  yield "b";',
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const collected = read.analysis.functions.find((fn) => fn.name === "chunks");
+  assert.deepEqual(collected?.returns, { kind: "slice", of: { kind: "text" } });
+});
+
 test("in asks whether an index is one a list holds", () => {
   // The structural hash walks a sparse list with `index in array`. A list holds
   // the indexes it wrote, so the question is the bounds question, and the index

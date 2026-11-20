@@ -1025,7 +1025,7 @@ export function mapTypeScriptType(text: string, _position: string, wideBigint = 
   // `Array<T>` and the names that walk the same list are a block of T: a
   // program walks a list, and `Iterable<T>` is the list a loop or a spread
   // over it holds.
-  const generic = /^(?:Array|ReadonlyArray|Iterable|ArrayLike)<(.+)>$/.exec(source);
+  const generic = /^(?:Array|ReadonlyArray|Iterable|ArrayLike|Generator)<(.+)>$/.exec(source);
   if (generic !== null) return { kind: "slice", of: mapTypeScriptType(generic[1] as string, _position, wideBigint) };
   return ANY_TYPE;
 }
@@ -7550,14 +7550,12 @@ class TypeScriptParser {
       return null;
     }
     this.expect("function");
-    const name = this.next();
-    // `function* name()`: a generator is refused by the star, which is where it
-    // was written rather than by the name the parser went looking for.
-    if (name.text === "*") {
-      this.report("a generator is not supported", REFUSED_KEYWORDS.yield, name);
-      this.skipBlock();
-      return null;
+    let generator = false;
+    if (this.at("*")) {
+      this.next();
+      generator = true;
     }
+    const name = this.next();
     if (name.kind !== "ident") {
       this.report("expected a function name", `near "${name.text}"`, name);
       this.synchronize();
@@ -7566,7 +7564,7 @@ class TypeScriptParser {
     // The type parameters a generic function declares are erased with the
     // types themselves: they say what the body may hold, not what it does.
     if (this.at("<")) this.skipTypeParameters();
-    const parsed = this.parseFunction(name, isAsync);
+    const parsed = this.parseFunction(name, isAsync, generator);
     if (parsed === null) return null;
     // A signature with no body names how the function is called and is not a
     // function of the file: the body below it is. It still says what a call
@@ -7812,7 +7810,7 @@ class TypeScriptParser {
     return made;
   }
 
-  private parseFunction(name: Token, isAsync = false): TypeScriptFunction | null {
+  private parseFunction(name: Token, isAsync = false, isGenerator = false): TypeScriptFunction | null {
     // A function declared by the module is not a method: `this` names nothing
     // in it, and the class each of its names holds starts empty.
     this.currentClass = null;
@@ -7844,13 +7842,14 @@ class TypeScriptParser {
     let restAt: { element: TypeExpr; fixed: number } | null = null;
     const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => {
       this.valueCollections = fileCollections;
-      this.finishBoxes(body, params, true);
+      const lowered = isGenerator ? this.lowerGenerator(body, returns, name.line) : body;
+      this.finishBoxes(lowered, params, true);
       this.resolveArrowCalls();
       const fn: TypeScriptFunction = {
         name: name.text,
         params,
         returns,
-        body,
+        body: lowered,
         line: name.line,
       };
       if (shape !== null) fn.returnsShape = shape;
@@ -8005,8 +8004,16 @@ class TypeScriptParser {
     }
     this.next();
     answered = this.annotationCollection(new Set(["{", "=", ";"]));
-    const returnType = this.readTypeAnnotation("a return type", new Set(["{", "=", ";"]), isAsync);
+    let returnType = this.readTypeAnnotation("a return type", new Set(["{", "=", ";"]), isAsync);
     const returnShape = this.lastAnnotationShape(isAsync);
+    if (isGenerator) {
+      // `Generator<T>` is the list the yields build. The source names the
+      // element at the annotation, which is the type the caller's walk reads.
+      const range = this.lastTypeRange;
+      const written = range === null ? "" : this.tokens.slice(Number(fieldOf(range, "start")), Number(fieldOf(range, "end"))).map((token) => String(fieldOf(token, "text"))).join("");
+      const mapped = mapTypeScriptType(written, "", this.wideBigint);
+      if (mapped.kind === "slice" || mapped.kind === "array") returnType = mapped;
+    }
     // A signature with no body is an overload: it names how the function below
     // it is called, and the body the declaration after it writes is the one
     // that runs.
@@ -9507,6 +9514,15 @@ class TypeScriptParser {
     // keyword when it names a statement, and an operator when it starts an
     // expression, so reading it as the expression it is keeps the two apart.
     if (this.at("await")) return this.readEffect();
+    // `yield x` writes one element of the list a generator answers, and `yield*
+    // xs` writes every element xs holds. Both are read as calls the generator
+    // lowering turns into writes to the list.
+    if (this.at("yield")) {
+      this.next();
+      const all = this.accept("*");
+      const value = this.readExpression();
+      return { kind: "expression", value: { k: "call", name: all ? "__yieldAll" : "__yield", args: [value] }, line: token.line };
+    }
 
     // `type` is an identifier the language allows anywhere a name goes: only a
     // statement that writes a type alias declares a type, and every other use
@@ -10728,6 +10744,67 @@ class TypeScriptParser {
       return { kind: "assign", target: String(fieldOf(value, "target")), op: "=", value: call, line };
     }
     return { kind: "memberAssign", base, field: String(fieldOf(value, "target")), op: "=", value: call, line };
+  }
+
+  /**
+   * A generator is read as the list it yields. `yield` writes one element,
+   * `yield*` writes every element the delegated list holds, and a `return`
+   * answers the list. The `Generator<T>` the source wrote names the element,
+   * so the caller walks the same list the yields built.
+   */
+  private lowerGenerator(body: readonly Statement[], returns: TypeExpr, line: number): Statement[] {
+    const element: TypeExpr = returns.kind === "slice" || returns.kind === "array" ? returns.of : TEXT_RESULT;
+    const list: TypeExpr = { kind: "slice", of: element };
+    const out = `__yielded${this.fieldCount++}`;
+    const helper = this.appendHelper("push", element, 1, line)?.name ?? "";
+    const push = (value: Expression, at: number): Statement =>
+      this.appendWrite({ k: "append", target: out, base: null, helper, op: "push", values: [value], element }, at);
+    const rewrite = (ones: readonly Statement[]): Statement[] => {
+      const written: Statement[] = [];
+      for (const statement of ones) {
+        if (statement.kind === "expression") {
+          const value = statement.value;
+          if (value.k === "call" && (value.name === "__yield" || value.name === "__yieldAll")) {
+            const arg = (value.args as Expression[])[0] ?? this.zeroFor(element);
+            if (value.name === "__yield") written.push(push(arg, statement.line));
+            else {
+              const held = `__yieldFrom${this.fieldCount++}`;
+              const item = `__yieldItem${this.fieldCount++}`;
+              written.push({ kind: "declare", name: held, type: list, init: arg, line: statement.line });
+              written.push({
+                kind: "forOf",
+                variable: item,
+                of: held,
+                body: [push({ k: "ident", name: item }, statement.line)],
+                line: statement.line,
+              });
+            }
+            continue;
+          }
+        }
+        if (statement.kind === "result") {
+          written.push({ kind: "result", value: { k: "ident", name: out }, line: statement.line });
+          continue;
+        }
+        written.push(this.rewriteGeneratorBodies(statement, rewrite));
+      }
+      return written;
+    };
+    const rewritten = rewrite(body);
+    const first: Statement = { kind: "declare", name: out, type: list, init: this.zeroFor(list), line };
+    const last: Statement = { kind: "result", value: { k: "ident", name: out }, line };
+    const ended = rewritten.length > 0 && rewritten[rewritten.length - 1]?.kind === "result";
+    return [first, ...rewritten, ...(ended ? [] : [last])];
+  }
+
+  /** Applies a generator body rewrite to every nested body of one statement. */
+  private rewriteGeneratorBodies(statement: Statement, rewrite: (body: readonly Statement[]) => Statement[]): Statement {
+    const copy = { ...statement } as Record<string, unknown>;
+    for (const key of ["body", "then", "otherwise", "catchBody", "finallyBody"]) {
+      const nested = fieldOfOptional(copy, key);
+      if (Array.isArray(nested)) copy[key] = rewrite(nested as Statement[]);
+    }
+    return copy as unknown as Statement;
   }
 
   /** The call that grows the list, joining a written value as a list of one. */
@@ -21451,9 +21528,10 @@ class TypeScriptParser {
     // whatever came next, and the build failed on the expression after it rather
     // than on the word that was written.
     if (token.kind === "ident" && token.text === "yield") {
-      this.report(`"${token.text}" is not supported`, refusedKeyword(token.text) ?? "", token);
-      this.readExpression();
-      return this.hole();
+      this.next();
+      const all = this.accept("*");
+      const value = this.readExpression();
+      return { k: "call", name: all ? "__yieldAll" : "__yield", args: [value] };
     }
     if (token.kind === "ident" && token.text === "await") {
       // `await v` is the value the promise `v` carries. The word binds like a

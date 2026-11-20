@@ -47,10 +47,10 @@ or one language capability that the rung below it does not need.
 
 ## Where the source stands
 
-The measured tree is 107 compiler sources. The frontend reads 106 of them whole
-and refuses 2 constructs in the remaining 1, so `test/self-host.test.ts` does
-not pass yet; those refusals are the current queue for rung 4 (see "The current
-refusals" and "Where the self-build stands"). The sources are already written
+The measured tree is 107 compiler sources, and the frontend reads all 107 whole:
+`test/self-host.test.ts` reports **0 refusals**. The queue is empty, so the gate
+is no longer the frontend but what a native build does with the whole module
+graph (see "Where the self-build stands"). The sources are already written
 as **erasable TypeScript**: `erasableSyntaxOnly` is on in
 `src/compiler/tsconfig.json`, so no `enum`, `namespace`, parameter property or
 `import =` carries runtime behaviour, and every `interface`, type alias,
@@ -146,54 +146,46 @@ The linked module graph reads the compiler's sources whole, including:
   and a field a constant object does not write is the absence the optional
   property is.
 
-### The current refusals
+### The refusal queue
 
-`blaze ir` on `src/compiler` contracts the whole module graph and stops at the
-constructs below. They are the current queue for rung 4: each is a construct
-the compiler writes and the frontend does not yet read, so each is a reason to
-teach the language or the value model, never to rewrite the source. The counts
-come from `test/self-host-gap.ts`.
-
-- `function*` and `yield*` (`core/json-store.ts`, 2): a generator is not yet
-  part of a program.
-
-The earlier blockers on this queue have landed: `BigInt(text)`, the wraps and
-signed comparisons in the contract evaluator, `Number(bigint)`,
-`structuredClone`, and the frontend reads that let `Array.from`, a member read
-through a cast and a conditional object spread resolve. They are described
+`blaze ir` on `src/compiler` contracts the whole module graph without refusing
+anything: `test/self-host-gap.ts` reports zero. Every construct the compiler
+writes is one the frontend reads, so there is no longer a queue of refusals to
+work through. The constructs that used to be on it — `BigInt(text)` and its
+wraps, `Number(bigint)`, `structuredClone`, `Array.from`, a member read through
+a cast, a conditional object spread, an `in` question over a list, a dictionary
+holding a block under a reference key, and `function*`/`yield*` — are described
 under "Where the self-build stands" and have small regressions in
-`test/self-build-regressions.test.ts`.
+`test/self-build-regressions.test.ts`. A new refusal is still a reason to teach
+the language or the value model, never to rewrite the source.
 
 ## The next slices
 
 In the order they block rung 4:
 
-1. **The current refusals.** The 2 constructs listed above, in the JSON store. They stop the compiler from
-   reading all the functions in its own module graph, so nothing past them can
-   be measured by a self-build.
-2. **An object the file returns whole.** A compiled function cannot read a
+1. **An object the file returns whole.** A compiled function cannot read a
    module object by name; the literal at the name is the use, but inlining it
    must not stop the constant tables (a membership question, a bracket read,
    `Object.hasOwn`) reading the keys the declaration wrote. Module constants
    now inline whole, including quoted keys and nested literals; a general
    reading for an object a function returns is still open.
-3. **The remaining host services.** The native adapter carries the file,
+2. **The remaining host services.** The native adapter carries the file,
    process, clock, path, command, environment, random, hash and text
    services, and `process.execPath` is among them now. What is left is the wasm
    host's Node entry, and any service the compiler sources ask for that the
    adapter does not yet answer.
-4. **The value-model residuals.** A function reference written directly in a
+3. **The value-model residuals.** A function reference written directly in a
    program body (a bare code address rather than a closure) is not a value a
    field holds; an empty list in a field and a list stored in a dictionary
    still have layout edges; and a value whose type is an intersection with a
    union is still read as the whole union.
-5. **The self-build project.** `src/compiler/blaze.toml` names the entry
+4. **The self-build project.** `src/compiler/blaze.toml` names the entry
    (`cli.ts`), the host mappings (`#host/model`, `#host/platform` and
    `#host/toml`) and the machine output. It needs the toolchain services a
    build uses (`cc`, `as`, `ld` and `nim` when asked), atomic writes to
    `.blaze/`, and a decision on the fingerprint: read the installed sources at
    run time, or embed the fingerprint at build time.
-6. **The fixed point test.** Node builds stage 1, stage 1 builds stage 2, and
+5. **The fixed point test.** Node builds stage 1, stage 1 builds stage 2, and
    stage 2 builds stage 3. Compare the three on the conformance corpus:
 
    - exit status, stdout and stderr of every command;
@@ -279,9 +271,9 @@ binary is made of.
 
 ## Where the self-build stands
 
-The gap report currently reads 106 of 107 compiler sources whole and refuses 2
-constructs in the other 1, so `test/self-host.test.ts` fails; the tests and
-benchmarks are outside the binary. The contract and IR phases read the functions
+The gap report reads all 107 compiler sources whole with zero refusals, so
+`test/self-host.test.ts` passes; the tests and benchmarks are outside the
+binary. The contract and IR phases read the functions
 that used to stop a self-build — `verifyCandidate` and the wasm backend's `Body`
 methods among them — and the fixes have small regressions in
 `test/self-build-regressions.test.ts`. These slices have landed:
@@ -346,11 +338,16 @@ methods among them — and the fixes have small regressions in
   map that holds a list of names builds;
 - `instanceof` a built-in collection is answered as the other built-in classes
   are: the declared type settles it, and an untyped value is one when it is
-  there at all.
+  there at all;
+- a generator is read as the list it yields: `yield` writes one element,
+  `yield*` writes every element the delegated list holds, and `Generator<T>`
+  states the element type the caller walks. The JSON store's batched writes
+  now read, and both backends run a generator end to end.
 
 The object layout pass and the C driver build: both read their statements,
 shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The whole-tree gate is the 2 refusals above; fixed point is not reached yet.
+The frontend gate is clear; what remains is making a native build of the whole
+tree and comparing the fixed point. Fixed point is not reached yet.
