@@ -6615,9 +6615,16 @@ double blaze_value_ref(void* pointer) {
   return blaze_dynamic_from_value(blaze_pointer_value(pointer));
 }
 void* blaze_pointer_of_handle(double handle) {
-  BlazeValue value = blaze_value_from_dynamic(handle);
+  // The word is either a handle's payload or the bits of a raw pointer a body
+  // carried as a double. Reading it through the dynamic value helper would
+  // cast a pointer's tiny double to an integer and lose every bit, so inspect
+  // the payload directly and fall back to the bits themselves.
+  BlazeValue value = blaze_dyn_tagged(handle);
   blaze_rt_entry* entry = blaze_registry_entry_of_payload(value.payload);
-  return entry == NULL ? NULL : entry->pointer;
+  if (entry != NULL) return entry->pointer;
+  uint64_t bits = 0;
+  memcpy(&bits, &handle, sizeof bits);
+  return (void*)(uintptr_t)bits;
 }
 
 static blaze_dyn* blaze_dyn_lookup(double h) {

@@ -1374,8 +1374,10 @@ class FunctionEmitter {
       // map's handle leaves the box's payload in the cell, so the next read
       // carries an unrelated handle. A text still goes through the boxer, whose
       // handle is the value the cell keeps.
-      const targetType = String(fieldOf(call,"callee")) === "blaze_rt_state_set" && index === 1 && isNumber(fieldOf(argument,"type"))
-        ? fieldOf(argument,"type") as SemanticType
+      const argumentType = fieldOf(argument,"type") as SemanticType;
+      const targetType = String(fieldOf(call,"callee")) === "blaze_rt_state_set" && index === 1 &&
+        isNumber(argumentType) && !isWideType(argumentType)
+        ? argumentType
         : statedType;
       // A text local is held in a cell, and a parameter declared `boxedtext` is
       // handed the cell: that is how a mutable text a nested function writes
