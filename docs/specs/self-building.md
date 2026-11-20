@@ -339,6 +339,8 @@ methods among them — and the fixes have small regressions in
 - `instanceof` a built-in collection is answered as the other built-in classes
   are: the declared type settles it, and an untyped value is one when it is
   there at all;
+- a cast to a function type keeps its shape through the handle-to-pointer read,
+  so a callback read off an opaque request is called through its value;
 - a generator is read as the list it yields: `yield` writes one element,
   `yield*` writes every element the delegated list holds, and `Generator<T>`
   states the element type the caller walks. The JSON store's batched writes

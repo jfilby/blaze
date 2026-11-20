@@ -147,7 +147,8 @@ test("a callback read through a cast is called through the value", () => {
   const read = readTypeScriptModule(source, "module.ts", false);
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
   const fn = read.analysis.functions.find((one) => one.name === "review");
-  const body = JSON.stringify(fn?.handle?.body ?? []);
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  const body = JSON.stringify(handle?.body ?? []);
   assert.match(body, /"k":"invoke"/, "the callback is called through its value");
 });
 
