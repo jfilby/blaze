@@ -131,6 +131,45 @@ test("instanceof a built-in collection reads for a value the type does not name"
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });
 
+test("an optional method parameter is callable without the argument", () => {
+  // A method's `?` makes a shorter arity: the wrapper answers the zero of the
+  // type it left out, so a call of the shorter form keeps its arity.
+  const source = [
+    "class Hub {",
+    "  send(tag: string, extra?: number): string { return tag; }",
+    "}",
+    "export function demo(hub: Hub): string { return hub.send(`a`); }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "demo");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  assert.match(JSON.stringify(handle?.body ?? []), /Hub_send__1/, "the shorter arity is called");
+});
+
+test("a function type with no parameters takes no arguments", () => {
+  const source = "export function f(x: unknown): void { (x as () => void)(); }\n";
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "f");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  const body = JSON.stringify(handle?.body ?? []);
+  assert.match(body, /"params":\[\]/, "the invoke states no parameters");
+});
+
+test("a second cast still states the function's signature", () => {
+  // `x as unknown as (n: number) => void` used to read the first assertion's
+  // type, so the call became a named call and lost its function value.
+  const source = "export function f(x: unknown): void { (x as unknown as (n: number) => void)(1); }\n";
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "f");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  const body = JSON.stringify(handle?.body ?? []);
+  assert.match(body, /"k":"invoke"/, "the value is called through its signature");
+});
+
 test("an object returned at a declared type lays out its optional fields", () => {
   // Two literals that write the same declared interface must be one layout,
   // even where one leaves an optional field out: a read of that field through

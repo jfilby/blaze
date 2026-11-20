@@ -1694,7 +1694,21 @@ class FunctionBody {
     const baseExpression = fieldOfValue(expression, "base") as Expression;
     const baseName = baseExpression.k === "ident" ? String(fieldOfValue(baseExpression, "name")) : null;
     const settled = baseName === null ? null : this.narrowingFor(baseName);
-    const layouts = this.layoutsWith(fieldOfValue(base, "inferred") as Inferred, describe(fieldOfValue(base, "inferred") as Inferred), String(fieldOfValue(expression, "field")), expect ?? ANY, line, settled);
+    const fieldName = String(fieldOfValue(expression, "field"));
+    let layouts: string[];
+    try {
+      layouts = this.layoutsWith(fieldOfValue(base, "inferred") as Inferred, describe(fieldOfValue(base, "inferred") as Inferred), fieldName, expect ?? ANY, line, settled);
+    } catch (error) {
+      // An unshaped reference may hold any record the program laid out with
+      // this field, at different offsets. The record carries the layout it was
+      // written with, so the field is read by name through the runtime rather
+      // than guessed at one of the offsets.
+      if (error instanceof CompilerError && error.message.includes("could each be a field of")) {
+        const name: SemanticValue = { k: "text", type: TEXT, parts: [{ k: "text", value: fieldName }] };
+        return this.runtimeCall("blaze_rt_object_get_from_handle", [object, name], ANY_REF);
+      }
+      throw error;
+    }
     // The program lays out no object with that field at all, so it says
     // nothing about what is behind the reference. The reference is then the
     // only value of the object the IR can name, and it is the one every body

@@ -1170,7 +1170,10 @@ class TypeText {
         // text, which is what an argument is read at.
         return {
           kind: "function",
-          params: this.splitMembers(inner).map((one) => this.parameterType(one)),
+          // `() => T` takes no arguments. An empty text is one empty member to
+          // the splitter, which would otherwise state a phantom `any` parameter
+          // and make a call through the value fail its arity.
+          params: inner.trim() === "" ? [] : this.splitMembers(inner).map((one) => this.parameterType(one)),
           returns: this.union(),
         };
       }

@@ -2124,6 +2124,27 @@ test("a map of lists holds each list whole, with its length", async () => {
   }
 });
 
+test("a field of an unshaped reference is read by name", async () => {
+  // Two layouts hold `value` at different offsets. A cast to one cannot give a
+  // read through an unshaped reference a static offset: the record carries its
+  // own layout, so the field is read by name from the descriptor.
+  const source = [
+    "interface A { pad: number; value: number }",
+    "interface B { value: number }",
+    "export function demo(): number {",
+    "  const b: B = { value: 7 };",
+    "  const a = b as unknown as A;",
+    "  return a.value;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "7", `the ${backend} backend reads a field by name`);
+  }
+});
+
 test("a generator answers the list its yields write", async () => {
   // A generator is read as the list it yields: one `yield` writes an element,
   // `yield*` writes every element the delegated list holds, and the caller

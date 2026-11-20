@@ -47,6 +47,8 @@ export interface ClassParam {
   /** The tokens of a default value, or -1 when the parameter has none. */
   defaultStart: number;
   defaultEnd: number;
+  /** `x?: T` is callable without `x`, which answers the zero of its type. */
+  optional?: boolean;
   line: number;
 }
 
@@ -340,7 +342,8 @@ function readParams(
     }
     const name = nameToken.text;
     index += 1;
-    if (isPunct(tokens[index], "?")) index += 1;
+    const optional = isPunct(tokens[index], "?");
+    if (optional) index += 1;
     let typeName = "any";
     if (isPunct(tokens[index], ":")) {
       const annotation = annotationType(tokens, index + 1, limit, new Set([",", ")", "="]));
@@ -355,7 +358,7 @@ function readParams(
       index = skipValue(tokens, index, limit, true);
       defaultEnd = index;
     }
-    params.push({ name, typeName, property, defaultStart, defaultEnd, line });
+    params.push({ name, typeName, property, defaultStart, defaultEnd, ...(optional ? { optional: true } : {}), line });
     if (isPunct(tokens[index], ",")) {
       index += 1;
       continue;
@@ -813,7 +816,7 @@ export function methodFunctionName(owner: string, method: ClassMethod, arity: nu
 export function requiredParams(params: readonly ClassParam[]): number {
   let required = 0;
   for (let index = 0; index < params.length; index += 1) {
-    if (params[index].defaultStart < 0) required = index + 1;
+    if (params[index].defaultStart < 0 && params[index].optional !== true) required = index + 1;
   }
   return required;
 }

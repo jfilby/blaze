@@ -6009,13 +6009,16 @@ class TypeScriptParser {
         // written as an empty list is a list of the elements the parameter
         // states, exactly as it is in a function's own declaration.
         const typeName = String(fieldOf(param, "typeName"));
-        const value = this.withClassContext(info, params, self, () =>
-          this.readAt(
-            this.typeForName(typeName, Number(fieldOf(param, "line"))),
-            () => this.readRange(Number(fieldOf(param, "defaultStart")), Number(fieldOf(param, "defaultEnd"))),
-            this.shapeForName(typeName),
-          ),
-        );
+        const declaredType = this.typeForName(typeName, Number(fieldOf(param, "line")));
+        const value = fieldOf(param, "optional") === true
+          ? this.zeroFor(declaredType)
+          : this.withClassContext(info, params, self, () =>
+            this.readAt(
+              declaredType,
+              () => this.readRange(Number(fieldOf(param, "defaultStart")), Number(fieldOf(param, "defaultEnd"))),
+              this.shapeForName(typeName),
+            ),
+          );
         statements[statements.length] = { kind: "declare", name, type: null, init: value, line: methodLine };
         return { k: "ident", name };
       });
@@ -6525,6 +6528,9 @@ class TypeScriptParser {
       // its text: the brackets are punctuation, and only punctuation nests.
       const punctuated = token.kind === "punct";
       const flat = parens === 0 && brackets === 0 && braces === 0 && angles === 0;
+      // `as` and `satisfies` are words, not punctuation, but a second assertion
+      // still ends the type the first one states.
+      if (!punctuated && flat && stops.has(text) && (text === "as" || text === "satisfies")) return at;
       // A stop is read before the bracket it may open. `{` is the one that is
       // both: it starts an object type where the type expects one, and it
       // opens the function body where the annotation has ended.
@@ -15010,6 +15016,9 @@ class TypeScriptParser {
   "]",
   "}",
   ";",
+  // A second assertion is a new cast, not part of the type this one states.
+  "as",
+  "satisfies",
   ".",
   "?",
   ":",

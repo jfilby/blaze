@@ -1606,6 +1606,17 @@ entry(
     { tags: ["object"] },
   ),
   entry(
+    "blaze_rt_object_get_from_handle",
+    "double",
+    [
+      ["object", "double"],
+      ["field", "const char*"],
+    ],
+    "Reads one field of a record by name through the layout the record carries.",
+    "Returns the field as a managed handle; an object without the field answers the null handle.",
+    { tags: ["object"] },
+  ),
+  entry(
     "blaze_rt_object_has_field",
     "double",
     [
@@ -9799,6 +9810,33 @@ const char* blaze_rt_type_of_from_handle(double handle) {
 }
 double blaze_rt_object_has_field_from_handle(double handle, const char* field) {
   return blaze_rt_object_has_field(blaze_pointer_of_handle(handle), field);
+}
+
+/* A field read where the program cannot name the layout: the record carries its
+   descriptor, so the field is found by name and read at the type it holds. A
+   reference and a text are returned as the handles the runtime keeps for them,
+   which is what a compiled value holds when it crosses this boundary. */
+double blaze_rt_object_get_from_handle(double handle, const char* field) {
+  BlazeValue owner = blaze_value_from_dynamic(handle);
+  void* object = blaze_pointer_of_value(&owner, BLAZE_HANDLE_RECORD, "blaze_rt_object_get");
+  if (object == NULL) return 0.0;
+  const char* kind = NULL;
+  unsigned char* at = blaze_rt_object_field(object, field, &kind);
+  if (at == NULL) return 0.0;
+  if (strcmp(kind, "f64") == 0) {
+    double number = 0;
+    memcpy(&number, at, sizeof number);
+    return blaze_dynamic_from_value(blaze_value_number(number));
+  }
+  if (strcmp(kind, "f32") == 0) {
+    float small = 0;
+    memcpy(&small, at, sizeof small);
+    return blaze_dynamic_from_value(blaze_value_number((double)small));
+  }
+  if (strcmp(kind, "bool") == 0) return blaze_dynamic_from_value(blaze_value_boolean(at[0] != 0));
+  const void* pointer = NULL;
+  memcpy(&pointer, at, sizeof pointer);
+  return blaze_dynamic_from_value(blaze_pointer_value(pointer));
 }
 double blaze_rt_state_get_handle(const char* key) {
   return blaze_dynamic_from_value(blaze_rt_state_get(key));

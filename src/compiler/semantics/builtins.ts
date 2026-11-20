@@ -191,6 +191,7 @@ function builtinTable(): Map<string, BuiltinSignature> {
   "blaze_rt_object_has_field", { params: [POINTER, TEXT], returns: F64, arity: 2 });
 
   table.set("blaze_rt_object_has_field_from_handle", { params: [F64, TEXT], returns: F64, arity: 2 });
+  table.set("blaze_rt_object_get_from_handle", { params: [F64, TEXT], returns: { kind: "ref", of: null }, arity: 2 });
 
   table.set("blaze_pointer_of_handle", { params: [F64], returns: ANY, arity: 1 });
 
