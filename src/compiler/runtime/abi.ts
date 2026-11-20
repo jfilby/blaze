@@ -2269,6 +2269,8 @@ export const HANDLE_WRAPPER_SYMBOLS: readonly string[] = [
   "blaze_rt_to_text_from_handle",
   "blaze_rt_type_of_from_handle",
   "blaze_rt_object_has_field_from_handle",
+  "blaze_rt_state_get_handle",
+  "blaze_rt_state_set_handle",
   "blaze_rt_sha256_digest_handle",
   "blaze_rt_sha256_digest_text",
   "blaze_rt_sha256_create_handle",
@@ -2372,6 +2374,8 @@ typedef struct blaze_i256 {
 const HEADER_EPILOGUE = `
 extern BlazeValue blaze_current_promise;
 double blaze_rt_object_has_field_from_handle(double object, const char* field);
+double blaze_rt_state_get_handle(const char* key);
+double blaze_rt_state_set_handle(const char* key, double value);
 double blaze_rt_sha256_digest_handle(double hasher);
 const char* blaze_rt_sha256_digest_text(double hasher);
 double blaze_rt_sha256_create_handle(void);
@@ -4797,7 +4801,9 @@ const char* blaze_rt_exec_path(void) {
 
 typedef struct {
   char* key;
-  double value;
+  /* The whole tagged value, not just its number: a cell may hold a map, a
+     list or another handle whose tag the next read needs to see again. */
+  BlazeValue value;
 } blaze_rt_state_cell;
 
 static blaze_rt_state_cell* blaze_rt_state_cells = NULL;
@@ -4825,19 +4831,19 @@ static blaze_rt_state_cell* blaze_rt_state_cell_of(const char* key) {
   memcpy(copied, key, length + 1);
   blaze_rt_state_cell* cell = &blaze_rt_state_cells[blaze_rt_state_count];
   cell->key = copied;
-  cell->value = 0.0;
+  cell->value = blaze_value_number(0.0);
   blaze_rt_state_count += 1;
   return cell;
 }
 
 BlazeValue blaze_rt_state_get(const char* key) {
   blaze_rt_state_cell* cell = blaze_rt_state_cell_of(key);
-  return cell == NULL ? blaze_value_null() : blaze_value_number(cell->value);
+  return cell == NULL ? blaze_value_null() : cell->value;
 }
 
 BlazeValue blaze_rt_state_set(const char* key, BlazeValue value) {
   blaze_rt_state_cell* cell = blaze_rt_state_cell_of(key);
-  if (cell != NULL) cell->value = blaze_value_number_of(&value);
+  if (cell != NULL) cell->value = value;
   return value;
 }
 
@@ -9754,6 +9760,12 @@ const char* blaze_rt_type_of_from_handle(double handle) {
 }
 double blaze_rt_object_has_field_from_handle(double handle, const char* field) {
   return blaze_rt_object_has_field(blaze_pointer_of_handle(handle), field);
+}
+double blaze_rt_state_get_handle(const char* key) {
+  return blaze_dynamic_from_value(blaze_rt_state_get(key));
+}
+double blaze_rt_state_set_handle(const char* key, double value) {
+  return blaze_dynamic_from_value(blaze_rt_state_set(key, blaze_value_from_dynamic(value)));
 }
 double blaze_rt_sha256_digest_handle(double hasher) {
   return blaze_dynamic_from_value(blaze_rt_sha256_digest(blaze_value_from_dynamic(hasher)));

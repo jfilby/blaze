@@ -11463,7 +11463,7 @@ class Machine {
       this.at(argument, TEXT);
       const held = this.hold(TEXT, "blaze_state_key");
       this.store(held);
-      this.callSymbol("blaze_rt_state_get", [held], NUMBER);
+      this.callSymbol("blaze_rt_state_get_handle", [held], NUMBER);
       return;
     }
     if (callee === "blaze_rt_state_set") {
@@ -11472,10 +11472,10 @@ class Machine {
       this.at(args[0], TEXT);
       const key = this.hold(TEXT, "blaze_state_key");
       this.store(key);
-      this.at(args[1], ANY_TYPE);
+      this.at(args[1], fieldOf(args[1], "type") as SemanticType);
       const value = this.hold(NUMBER, "blaze_state_value");
       this.store(value);
-      this.callSymbol("blaze_rt_state_set", [key, value], NUMBER);
+      this.callSymbol("blaze_rt_state_set_handle", [key, value], NUMBER);
       return;
     }
     if (callee === "argv") {

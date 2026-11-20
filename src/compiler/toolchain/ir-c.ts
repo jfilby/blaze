@@ -1368,7 +1368,14 @@ class FunctionEmitter {
       // the builtin's own parameter for almost every builtin, but a settle
       // function carries the value the executor handed it, not the untyped
       // reference the contract has for all four kinds.
-      const targetType = (fieldOf(call,"argTypes") as SemanticType[])[index] ?? (builtin !== null ? (fieldOf(builtin,"params") as SemanticType[])[index] : fieldOf(argument,"type"));
+      const statedType = (fieldOf(call,"argTypes") as SemanticType[])[index] ?? (builtin !== null ? (fieldOf(builtin,"params") as SemanticType[])[index] : fieldOf(argument,"type"));
+      // A cell holds the handle itself, not a number that boxes it: boxing a
+      // map's handle leaves the box's payload in the cell, so the next read
+      // carries an unrelated handle. A text still goes through the boxer, whose
+      // handle is the value the cell keeps.
+      const targetType = String(fieldOf(call,"callee")) === "blaze_rt_state_set" && index === 1 && isNumber(fieldOf(argument,"type"))
+        ? fieldOf(argument,"type") as SemanticType
+        : statedType;
       // A text local is held in a cell, and a parameter declared `boxedtext` is
       // handed the cell: that is how a mutable text a nested function writes
       // travels. A parameter declared `text` is the string itself, so the value
