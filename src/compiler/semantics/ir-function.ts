@@ -2325,11 +2325,21 @@ class FunctionBody {
       const rightText = isText((fieldOfValue(right, "value") as SemanticValue).type) ||
         convertibleTo((fieldOfValue(right, "value") as SemanticValue).type, TEXT);
       if (text && !(leftText && rightText)) {
-        throw this.error(
-          `"${op}" compares a ${typeText((fieldOfValue(left, "value") as SemanticValue).type)} and a ${typeText((fieldOfValue(right, "value") as SemanticValue).type)}`,
-          line,
-          `a string is only compared with a string, and with another string for ===`,
-        );
+        // A comparison against a text asks the other side for its text, the
+        // same conversion an assignment to a text asks: a key read off a
+        // dynamic value is a number in one arm and a text in the other.
+        const asTextValue = (side: Typed): SemanticValue => this.asText(fieldOfValue(side, "value") as SemanticValue);
+        return {
+          value: {
+            k: "compare",
+            type: BOOLEAN,
+            op: op === "==" || op === "===" ? "eq" : "ne",
+            operand: TEXT,
+            left: asTextValue(left),
+            right: asTextValue(right),
+          },
+          inferred: asType(BOOL),
+        };
       }
       const wide = isWideType((fieldOfValue(left, "value") as SemanticValue).type) ? (fieldOfValue(left, "value") as SemanticValue).type : isWideType((fieldOfValue(right, "value") as SemanticValue).type) ? (fieldOfValue(right, "value") as SemanticValue).type : null;
       const leftValue = wide === null ? fieldOfValue(left, "value") as SemanticValue : this.wideOperand(fieldOfValue(left, "value") as SemanticValue, wide, line);
@@ -2348,15 +2358,13 @@ class FunctionBody {
     }
     // A string added to a string is the one operation with no number behind it.
     if (isText((fieldOfValue(left, "value") as SemanticValue).type) || isText((fieldOfValue(right, "value") as SemanticValue).type)) {
-      if (!isText((fieldOfValue(left, "value") as SemanticValue).type) || !isText((fieldOfValue(right, "value") as SemanticValue).type)) {
-        throw this.error(
-          `"${op}" is written over a ${typeText((fieldOfValue(left, "value") as SemanticValue).type)} and a ${typeText((fieldOfValue(right, "value") as SemanticValue).type)}`,
-          line,
-          `a string is added to a string, and compared with == and ===`,
-        );
-      }
+      // A text added to anything writes that thing as text: `line ${index}` is
+      // the concatenation the source spelled, not a refusal over the number an
+      // interpolation held before it was written.
+      const leftText = this.asText(fieldOfValue(left, "value") as SemanticValue);
+      const rightText = this.asText(fieldOfValue(right, "value") as SemanticValue);
       return {
-        value: { k: "arith", type: TEXT, op: "concat", left: fieldOfValue(left, "value") as SemanticValue, right: fieldOfValue(right, "value") as SemanticValue },
+        value: { k: "arith", type: TEXT, op: "concat", left: leftText, right: rightText },
         inferred: asType(numeric(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred)),
       };
     }

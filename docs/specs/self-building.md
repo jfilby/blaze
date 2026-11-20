@@ -362,6 +362,10 @@ methods among them — and the fixes have small regressions in
   type is called at the arity the source wrote; a settle function passed to
   `then` is the runtime builtin; `fn.call(receiver, args)` is the call of `fn`,
   and `valueOf()` answers the value the object already is;
+- an `Array.isArray` or `instanceof Map`/`Set` question narrows an untyped value
+  in the branch that holds, so a recursive walker's `some` and a map's `entries`
+  and a set's spread read; a number added to or compared with a text writes as
+  text;
 - a generator is read as the list it yields: `yield` writes one element,
   `yield*` writes every element the delegated list holds, and `Generator<T>`
   states the element type the caller walks. The JSON store's batched writes
@@ -372,8 +376,7 @@ shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear. A self-build now passes the contract phase, IR
-lowering and much of the object pass, and fails on a refused hole in a
-self-referential callback passed to `some` (`__closure_probe_5`, source line
-257). What remains is that refusal, the later spec slices, and the fixed point
-test. Fixed point is not reached yet.
+The frontend gate is clear. A self-build now passes the contract phase and IR
+lowering, and fails in the IR on a field a layout does not write
+(`programValue: Object568 has no field k`). What remains is that layout read,
+the later spec slices, and the fixed point test. Fixed point is not reached yet.

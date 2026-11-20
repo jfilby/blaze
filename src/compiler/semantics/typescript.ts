@@ -4098,6 +4098,8 @@ class TypeScriptParser {
    * `Array.isArray(node)` around it holds.
    */
   private arrayTests = new Map<Expression, Expression>();
+  /** The value a class test asked about, kept on the truth expression it became. */
+  private instanceofTests = new Map<Expression, { value: Expression; name: string }>();
   /** True while the source of a `for..of` is being read. */
   private readingIteration = false;
   /**
@@ -12453,6 +12455,7 @@ class TypeScriptParser {
       // every class of `extends Error` is one too. A value no type names may be
       // any instance, so it is one when it is there.
       const held = this.classOfExpression(left);
+      const subject = left;
       const isDate = name.text === "Date" && held !== null && this.classExtendsDate(held);
       const isOne = held !== null && (held === name.text || isDate || (name.text === "Error" && this.classNamed(held)?.base === "Error"));
       left =
@@ -12464,6 +12467,7 @@ class TypeScriptParser {
               left: { k: "literal", text: isOne ? "1" : "0" },
               right: { k: "literal", text: "1" },
             };
+      if (held === null) this.instanceofTests.set(left, { value: subject, name: name.text });
     }
     return left;
   }
@@ -12708,6 +12712,15 @@ class TypeScriptParser {
       shapes: new Map(),
     };
     const collect = (value: Expression, truth: boolean): void => {
+      // An `Array.isArray` question on a value nothing typed is the call the
+      // runtime answers, not a comparison: the branch it holds in still walks
+      // the value as a list of untyped elements.
+      if (value.k === "call" && this.arrayTests.has(value)) {
+        const subject = this.arrayTests.get(value) as Expression;
+        const path = truth ? this.narrowedPath(subject) : null;
+        if (path !== null) settled.types.set(path, { kind: "slice", of: ANY_TYPE });
+        return;
+      }
       if (value.k === "unary" && value.op === "!") {
         collect((fieldOf(value, "operand") as Expression), !truth);
         return;
@@ -12723,6 +12736,26 @@ class TypeScriptParser {
         return;
       }
       if (value.k !== "binary" || (value.op !== "===" && value.op !== "!==" && value.op !== "==" && value.op !== "!=")) return;
+      const instance = this.instanceofTests.get(value);
+      if (instance !== undefined) {
+        // The class test became a null question on the value. In the branch
+        // where it holds, the value is that class: a Set or a Map is the
+        // runtime's collection, so its methods and spreads read through it.
+        const holds = (value.op === "!==" || value.op === "!=") ? truth : !truth;
+        const path = holds ? this.narrowedPath(instance.value) : null;
+        if (path !== null) {
+          const set = instance.name === "Set" || instance.name === "WeakSet";
+          const map = instance.name === "Map" || instance.name === "WeakMap";
+          if (set) {
+            settled.types.set(path, NUMBER_RESULT);
+            settled.shapes.set(path, { kind: "set", of: { kind: "any" } });
+          } else if (map) {
+            settled.types.set(path, NUMBER_RESULT);
+            settled.shapes.set(path, { kind: "record", fields: new Map(), index: { kind: "any" } });
+          }
+        }
+        return;
+      }
       const positive = value.op === "===" || value.op === "==";
       const subject = this.arrayTests.get(value);
       if (subject !== undefined) {
@@ -14338,9 +14371,16 @@ class TypeScriptParser {
             replace(now);
             continue;
           }
+          // `map.entries()` is the pairs `Object.entries(map)` reports: a Map is
+          // the runtime's dictionary, and the pairs are what the walk reads.
+          if (target.field === "entries" && args.length === 0) {
+            const map: CollectionValue = { kind: "map", key: TEXT_RESULT, value: ANY_TYPE };
+            replace(this.entryPairs(receiver, map, Number(fieldOf(this.peek(), "line"))));
+            continue;
+          }
           if ((target.field === "toISOString" || target.field === "getTime") && args.length === 0) {
             const held = this.valueTypeOf(receiver);
-            if (held.kind === "primitive" && held.name === "f64") {
+            if ((held.kind === "primitive" && held.name === "f64") || (held.kind === "ref" && held.of === null)) {
               if (target.field === "getTime") {
                 replace(receiver);
                 continue;
@@ -16877,7 +16917,9 @@ class TypeScriptParser {
     // class is what says what it is.
     const sequence = this.valueTypeOf(receiver);
     let elements = sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : null;
-    if (elements !== null && unknownReference(elements)) elements = null;
+    // A list of unshaped elements is still a list: a callback over it reads an
+    // untyped element, which is what the source asking for its elements gets.
+    // Only a reference the read took for a list is not one.
     // A list another module offers is the shape its declaration names, and its
     // contract type erases to the reference: `HOST_SERVICES.map(...)` is a list
     // of the service the exported annotation writes.

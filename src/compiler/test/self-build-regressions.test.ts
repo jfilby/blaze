@@ -239,6 +239,53 @@ test("a rest function type is called at the arity the source wrote", () => {
   arityOf(handle?.body ?? []);
 });
 
+test("a recursive arrow passed to some reads through an array test", () => {
+  // `Array.isArray` narrows an untyped value to a list in the branch it holds,
+  // so `some` is the collection method and the self-reference is its callback.
+  const source = [
+    "export function walk(n: unknown): boolean {",
+    "  const visit = (node: unknown): boolean =>",
+    "    Array.isArray(node) ? node.some(visit) : node !== null;",
+    "  return visit(n);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  for (const fn of read.analysis.functions) {
+    const handle = fn.handle as { body?: unknown } | undefined;
+    assert.doesNotMatch(JSON.stringify(handle?.body ?? []), /__refused_/, `${fn.name} has no hole`);
+  }
+});
+
+test("a map and a set narrow through instanceof", () => {
+  const source = [
+    "export function read(value: object): string {",
+    "  if (value instanceof Map) return [...value.entries()].length.toString();",
+    "  if (value instanceof Set) return [...value].length.toString();",
+    "  return `none`;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "read");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  const body = JSON.stringify(handle?.body ?? []);
+  assert.match(body, /entryPairs|__entries|__pairs/, "map entries are read as pairs");
+});
+
+test("a number added to or compared with a text writes as text", () => {
+  const source = [
+    "export function demo(index: number): string {",
+    '  return `item ${index}` + (index === 1 ? `!` : `?`);',
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
 test("an object returned at a declared type lays out its optional fields", () => {
   // Two literals that write the same declared interface must be one layout,
   // even where one leaves an optional field out: a read of that field through
