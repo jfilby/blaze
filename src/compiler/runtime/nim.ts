@@ -559,6 +559,11 @@ proc blaze_rt_object_describe*(target: pointer, descriptor: cstring) {.exportc, 
     return
   headerOf(target)[].descriptor = cast[pointer](descriptor)
 
+proc blaze_rt_object_set_from_handle*(handle: float64, field: cstring, value: float64): float64 {.exportc, cdecl.} =
+  discard field
+  discard value
+  handle
+
 proc blaze_rt_object_get_from_handle*(handle: float64, field: cstring): float64 {.exportc, cdecl.} =
   ## A field read the program cannot name: the Nim host carries no record
   ## descriptor, so the answer is the null handle rather than a guessed field.

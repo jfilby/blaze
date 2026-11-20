@@ -358,6 +358,10 @@ methods among them — and the fixes have small regressions in
 - a method's `?` parameter is callable without the argument, `() => T` states no
   parameters, and a second `as` ends the first assertion's type so a cast to a
   function type still makes a call through the value;
+- a field write on an unshaped reference goes by name as well; a `rest` function
+  type is called at the arity the source wrote; a settle function passed to
+  `then` is the runtime builtin; `fn.call(receiver, args)` is the call of `fn`,
+  and `valueOf()` answers the value the object already is;
 - a generator is read as the list it yields: `yield` writes one element,
   `yield*` writes every element the delegated list holds, and `Generator<T>`
   states the element type the caller walks. The JSON store's batched writes
@@ -368,8 +372,8 @@ shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear. A self-build now passes the contract phase and IR
-lowering, and fails where a refused construct in the promise chain of the
-machine's queue reaches a body (`__closure_codegen_3`, source line 428). What
-remains is that refusal, the later spec slices, and the fixed point test. Fixed
-point is not reached yet.
+The frontend gate is clear. A self-build now passes the contract phase, IR
+lowering and much of the object pass, and fails on a refused hole in a
+self-referential callback passed to `some` (`__closure_probe_5`, source line
+257). What remains is that refusal, the later spec slices, and the fixed point
+test. Fixed point is not reached yet.

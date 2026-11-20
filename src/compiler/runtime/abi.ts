@@ -1606,6 +1606,18 @@ entry(
     { tags: ["object"] },
   ),
   entry(
+    "blaze_rt_object_set_from_handle",
+    "double",
+    [
+      ["object", "double"],
+      ["field", "const char*"],
+      ["value", "double"],
+    ],
+    "Writes one field of a record by name through the layout the record carries.",
+    "Returns the record. A field the record was not laid out with is not written.",
+    { tags: ["object"] },
+  ),
+  entry(
     "blaze_rt_object_get_from_handle",
     "double",
     [
@@ -9816,6 +9828,31 @@ double blaze_rt_object_has_field_from_handle(double handle, const char* field) {
    descriptor, so the field is found by name and read at the type it holds. A
    reference and a text are returned as the handles the runtime keeps for them,
    which is what a compiled value holds when it crosses this boundary. */
+double blaze_rt_object_set_from_handle(double handle, const char* field, double value) {
+  BlazeValue owner = blaze_value_from_dynamic(handle);
+  void* object = blaze_pointer_of_value(&owner, BLAZE_HANDLE_RECORD, "blaze_rt_object_set");
+  if (object == NULL) return handle;
+  const char* kind = NULL;
+  unsigned char* at = blaze_rt_object_field(object, field, &kind);
+  if (at == NULL) return handle;
+  if (strcmp(kind, "f64") == 0) {
+    memcpy(at, &value, sizeof value);
+    return handle;
+  }
+  if (strcmp(kind, "f32") == 0) {
+    float small = (float)value;
+    memcpy(at, &small, sizeof small);
+    return handle;
+  }
+  if (strcmp(kind, "bool") == 0) {
+    at[0] = value != 0.0 ? 1 : 0;
+    return handle;
+  }
+  const void* pointer = (const void*)(uintptr_t)value;
+  memcpy(at, &pointer, sizeof pointer);
+  return handle;
+}
+
 double blaze_rt_object_get_from_handle(double handle, const char* field) {
   BlazeValue owner = blaze_value_from_dynamic(handle);
   void* object = blaze_pointer_of_value(&owner, BLAZE_HANDLE_RECORD, "blaze_rt_object_get");

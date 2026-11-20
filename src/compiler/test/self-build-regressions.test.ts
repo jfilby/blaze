@@ -170,6 +170,75 @@ test("a second cast still states the function's signature", () => {
   assert.match(body, /"k":"invoke"/, "the value is called through its signature");
 });
 
+test("a promise's settle functions read as callbacks", () => {
+  // The machine's queue passes `resolve` and `reject` on to `then` inside the
+  // executor that declares them. They are the builtins that settle the promise
+  // rather than an invoke of a name the executor no longer holds.
+  const source = [
+    "export const take = <T>(task: () => T | Promise<T>): Promise<T> =>",
+    "  new Promise<T>((resolve, reject) => {",
+    "    Promise.resolve().then(task).then(resolve, reject).finally(() => {});",
+    "  });",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  for (const fn of read.analysis.functions) {
+    const handle = fn.handle as { body?: unknown } | undefined;
+    const body = JSON.stringify(handle?.body ?? []);
+    assert.doesNotMatch(body, /__refused_/, `${fn.name} has no refused hole`);
+  }
+  const settleCalls = read.analysis.functions.some((fn) => {
+    const handle = fn.handle as { body?: unknown } | undefined;
+    return JSON.stringify(handle?.body ?? []).includes('"name":"resolve"');
+  });
+  assert.ok(settleCalls, "the settle callback is a builtin call");
+});
+
+test("a call through valueOf and call keeps the value it names", () => {
+  const source = [
+    "export function demo(o: object, fn: (...args: unknown[]) => unknown): unknown {",
+    "  const boxed = o.valueOf();",
+    "  return fn.call(boxed, 1, 2);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "demo");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  const body = JSON.stringify(handle?.body ?? []);
+  assert.match(body, /"k":"invoke"/, "the call goes through the function value");
+});
+
+test("a rest function type is called at the arity the source wrote", () => {
+  const source = [
+    "interface Emit { print: unknown }",
+    "export function demo(emit: Emit): unknown[] {",
+    "  return (emit.print as unknown as (...args: unknown[]) => unknown[])(1, 2, 3, 4, 5, 6);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "demo");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  const arityOf = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const one of value) arityOf(one);
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    const call = value as { k?: string; args?: unknown[]; params?: unknown[] };
+    if (call.k === "invoke" && call.args !== undefined) {
+      assert.equal(call.params?.length, call.args.length, "the invoke states one type per argument");
+      assert.equal(call.args.length, 6, "six arguments were written");
+    }
+    for (const one of Object.values(value)) arityOf(one);
+  };
+  arityOf(handle?.body ?? []);
+});
+
 test("an object returned at a declared type lays out its optional fields", () => {
   // Two literals that write the same declared interface must be one layout,
   // even where one leaves an optional field out: a read of that field through

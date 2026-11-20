@@ -1107,8 +1107,26 @@ class FunctionBody {
     const baseSlot = fieldOfValue(base, "slot") as SemanticSlot;
     const baseInferred = fieldOfValue(base, "inferred") as Inferred;
     const baseName = String(fieldOfValue(base, "name"));
-    const layout = this.layoutForWrite(base, fieldName, writtenInferred, line);
     const object: SemanticValue = { k: "local", type: slotType(baseSlot), name: baseName };
+    let layout: string;
+    try {
+      layout = this.layoutForWrite(base, fieldName, writtenInferred, line);
+    } catch (error) {
+      // Many layouts may hold the field at different offsets. The record says
+      // which layout it was written with, so the write goes through the field
+      // name instead of a guessed offset. A boxed capture is written before
+      // this function's layout walk has seen the one-field object the frontend
+      // built for it, and that object still carries the field.
+      const ambiguous = error instanceof CompilerError && error.message.includes("could each be a field of");
+      const boxed = error instanceof CompilerError && fieldName === "__boxed" && error.message.includes("no layout");
+      if (ambiguous || boxed) {
+        const name: SemanticValue = { k: "text", type: TEXT, parts: [{ k: "text", value: fieldName }] };
+        const set = fieldOfValue(this.runtimeCall("blaze_rt_object_set_from_handle", [object, name, writtenValue], ANY_REF), "value") as SemanticValue;
+        if (set.k === "call") this.write({ k: "call", call: fieldOfValue(set, "call") as SemanticCall, line });
+        return;
+      }
+      throw error;
+    }
     // A layout is what the body stores, so a field written as nothing and then
     // as a number is a number, and a field the body writes but the literal
     // never held is a field of the object.

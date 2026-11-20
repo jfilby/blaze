@@ -3486,6 +3486,8 @@ interface FunctionType {
   returns: TypeExpr;
   /** The shape the returns name, for the await that unwraps it. */
   shape?: ResolvedType;
+  /** A rest parameter states the type of trailing arguments, not their count. */
+  rest?: true;
 }
 
 /**
@@ -3889,6 +3891,8 @@ class TypeScriptParser {
    * function the file declares. The map is empty outside an executor.
    */
   private settleNames = new Map<string, "resolve" | "reject">();
+  /** The signatures of an executor's resolve and reject, for use as callbacks. */
+  private settleSignatures = new Map<string, FunctionType>();
   /** How many boxes this file's arrows have needed, for naming them. */
   private boxCount = 0;
   /**
@@ -13307,7 +13311,10 @@ class TypeScriptParser {
             const params = heldShape.params.map((param) => this.typeExprOfShape(param));
             const returns = this.typeExprOfShape(heldShape.returns);
             const args = this.readCallArguments(params);
-            const made: Expression = { k: "invoke", callee: target, args, params, returns };
+            // A rest parameter names the type of every trailing argument, not
+            // their count: the invoke is made at the arity the call wrote.
+            const writtenParams = fieldOf(heldShape, "rest") === true ? args.map(() => ANY_TYPE) : params;
+            const made: Expression = { k: "invoke", callee: target, args, params: writtenParams, returns };
             const answered = this.shapeForRead(heldShape.returns);
             if (answered !== null) this.expressionShapes.set(made, answered);
             replace(made);
@@ -14240,7 +14247,8 @@ class TypeScriptParser {
           if (heldFunction !== null) {
             const heldParams = fieldOf(heldFunction, "params") as TypeExpr[];
             const args = this.readCallArguments(heldParams);
-            const invoke: Expression = { k: "invoke", callee: target, args, params: heldParams, returns: fieldOf(heldFunction, "returns") as TypeExpr };
+            const calledParams = fieldOf(heldFunction, "rest") === true ? args.map(() => ANY_TYPE) : heldParams;
+            const invoke: Expression = { k: "invoke", callee: target, args, params: calledParams, returns: fieldOf(heldFunction, "returns") as TypeExpr };
             const heldShape = fieldOfOptional(heldFunction, "shape") as ResolvedType | undefined;
             if (heldShape !== undefined) {
               const held = this.shapeForRead(heldShape);
@@ -14666,6 +14674,28 @@ class TypeScriptParser {
             replace(reports);
             continue;
           }
+          // A value the program holds answers `valueOf()` with itself: a
+          // compiled object has no method of that name, and the boxed values a
+          // source asks through it are the value the object already is.
+          if (target.field === "valueOf" && args.length === 0) {
+            replace(receiver);
+            continue;
+          }
+          // `fn.call(receiver, args)` is the call of `fn` with the receiver as
+          // its first argument: a compiled method takes the object it runs on
+          // the same way, so the special form is the ordinary call of the value.
+          if (target.field === "call" && args.length >= 1) {
+            const held = this.expressionFunctionType(receiver);
+            // The arguments name the arity of this call: a function type with
+            // a rest parameter states fewer than the call actually passes, so
+            // the invoke is written at the arity the source spelled out.
+            const params = args.map(() => ANY_TYPE);
+            const returns = held !== null ? held.returns : ANY_TYPE;
+            const called: Expression = { k: "invoke", callee: receiver, args, params, returns };
+            if (held !== null && held.shape !== undefined) this.expressionShapes.set(called, held.shape);
+            replace(called);
+            continue;
+          }
           // `p.then(onOk, onErr)` and `p.catch(onErr)`: the continuation a
           // promise that is already settled implies.
           const continued = this.promiseMethod(receiver, target.field, args);
@@ -14789,7 +14819,8 @@ class TypeScriptParser {
           if (held !== null) {
             const heldParams = fieldOf(held, "params") as TypeExpr[];
             const args = this.readCallArguments(heldParams);
-            const invoke: Expression = { k: "invoke", callee: target, args, params: heldParams, returns: fieldOf(held, "returns") as TypeExpr };
+            const calledParams = fieldOf(held, "rest") === true ? args.map(() => ANY_TYPE) : heldParams;
+            const invoke: Expression = { k: "invoke", callee: target, args, params: calledParams, returns: fieldOf(held, "returns") as TypeExpr };
             const heldShape = fieldOfOptional(held, "shape") as ResolvedType | undefined;
             if (heldShape !== undefined) {
               const answered = this.shapeForRead(heldShape);
@@ -15782,6 +15813,13 @@ class TypeScriptParser {
       return;
     }
     const settle = (fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[]).slice(0, 2);
+    // A settle function is also a value: `promise.then(resolve, reject)` hands
+    // them on as the callbacks they are, so they state a signature like any
+    // other function a body passes to a call.
+    for (const [index, one] of settle.entries()) {
+      const params = index === 0 ? [fieldOf(one, "type") as TypeExpr] : [ANY_TYPE];
+      this.settleSignatures.set(String(fieldOf(one, "name")), { params, returns: NOTHING });
+    }
     const dropped = new Set(settle.map((param: ParameterInfo) => param.name));
     // The closure the file holds shares the parameter list object, so the
     // parameters are removed where they are rather than by handing the lifted
@@ -17586,6 +17624,15 @@ class TypeScriptParser {
       const signature = this.callbackSignature(callback);
       if (signature === null) return null;
       const written = (fieldOf(signature, "params") as TypeExpr[]).length === 0 || argument === null ? [] : [argument];
+      // A settle function handed to `then` is the runtime's own: the executor
+      // does not hold it as a parameter, so the callback is the builtin that
+      // settles the promise rather than an invoke of an unbound name.
+      const settle = callback.k === "ident" ? this.settleNames.get(callback.name) : undefined;
+      if (settle !== undefined) {
+        const settled: Expression = { k: "call", name: settle, args: written, returns: signature.returns };
+        this.expressionTypes.set(settled, signature.returns);
+        return settled;
+      }
       const call: Expression = { k: "invoke", callee: callback, args: written, params: (fieldOf(signature, "params") as TypeExpr[]), returns: signature.returns };
       const declared = (fieldOf(signature, "shape") as ResolvedType | undefined);
       const shape = declared === undefined || declared === null ? null : this.shapeForRead(declared);
@@ -18159,6 +18206,7 @@ class TypeScriptParser {
       params: shape.params.map((param) => this.typeExprOfShape(param)),
       returns: this.typeExprOfShape(shape.returns),
       shape: shape.returns,
+      ...(fieldOf(shape, "rest") === true ? { rest: true as const } : {}),
     };
   }
 
@@ -21060,6 +21108,8 @@ class TypeScriptParser {
       }
     }
     if (value.k === "ident") {
+      const settle = this.settleSignatures.get(value.name);
+      if (settle !== undefined) return settle;
       const known = this.valueFunctions.get(value.name);
       if (known !== undefined) return known;
       // A name bound to an arrow is a function of the file, and the callback a
@@ -24162,11 +24212,18 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       const savedSettle = this.settleNames;
       this.settleNames = new Map(savedSettle);
       for (const one of settle) this.settleNames.set(one.name, one.settle);
+      // The executor's body is read before its parameters are withdrawn, so
+      // the settle functions need their callback signatures now: passing one
+      // to `then` is a use of it inside that same body.
+      const savedSignatures = this.settleSignatures;
+      this.settleSignatures = new Map(savedSignatures);
+      for (const one of settle) this.settleSignatures.set(one.name, { params: [ANY_TYPE], returns: NOTHING });
       let executor: Expression;
       try {
         executor = this.readExpression();
       } finally {
         this.settleNames = savedSettle;
+        this.settleSignatures = savedSignatures;
       }
       this.expect(")");
       this.settlingExecutor(executor, view);
@@ -24192,7 +24249,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
         return this.hole();
       }
       const args = this.readCallArguments((fieldOf(heldFunction, "params") as TypeExpr[]));
-      const invoke: Expression = { k: "invoke", callee: target, args, params: (fieldOf(heldFunction, "params") as TypeExpr[]), returns: heldFunction.returns };
+            const invoke: Expression = { k: "invoke", callee: target, args, params: (fieldOf(heldFunction, "params") as TypeExpr[]), returns: heldFunction.returns };
       if ((fieldOf(heldFunction, "shape") as ResolvedType | undefined) !== undefined) {
         const held = this.shapeForRead((fieldOf(heldFunction, "shape") as ResolvedType));
         if (held !== null) this.expressionShapes.set(invoke, held);
@@ -24466,7 +24523,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
         return this.hole();
       }
       const args = this.readCallArguments((fieldOf(heldFunction, "params") as TypeExpr[]));
-      const invoke: Expression = { k: "invoke", callee: target, args, params: (fieldOf(heldFunction, "params") as TypeExpr[]), returns: heldFunction.returns };
+            const invoke: Expression = { k: "invoke", callee: target, args, params: (fieldOf(heldFunction, "params") as TypeExpr[]), returns: heldFunction.returns };
       if ((fieldOf(heldFunction, "shape") as ResolvedType | undefined) !== undefined) {
         const held = this.shapeForRead((fieldOf(heldFunction, "shape") as ResolvedType));
         if (held !== null) this.expressionShapes.set(invoke, held);

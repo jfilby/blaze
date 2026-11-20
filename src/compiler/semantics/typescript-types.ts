@@ -148,7 +148,7 @@ export type ResolvedType =
        */
       tuple?: true;
     }
-  | { kind: "function"; params: ResolvedType[]; returns: ResolvedType }
+  | { kind: "function"; params: ResolvedType[]; returns: ResolvedType; rest?: true }
   | { kind: "ref"; name: string | null }
   /** The absent value of a union, which a value this compiler holds has not. */
   | { kind: "absent" }
@@ -1175,6 +1175,7 @@ class TypeText {
           // and make a call through the value fail its arity.
           params: inner.trim() === "" ? [] : this.splitMembers(inner).map((one) => this.parameterType(one)),
           returns: this.union(),
+          ...(this.splitMembers(inner).some((one) => one.trim().startsWith("...")) ? { rest: true as const } : {}),
         };
       }
       return inner.trim() === "" ? ANY_TYPE : resolveTypeText(this.table, inner, this.params, this.seen);
