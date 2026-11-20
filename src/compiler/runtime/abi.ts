@@ -8450,6 +8450,10 @@ static void blaze_rt_json_value_at(blaze_build* build, const unsigned char* at, 
 const char* blaze_rt_json_object(double value, double indent) {
   blaze_build build = { NULL, 0, 0 };
   const void* object = (const void*)(uintptr_t)value;
+  // A value the compiler could not name arrives as the handle a managed
+  // pointer is held in; a record the body wrote directly arrives as the
+  // pointer itself. Resolve the handle before deciding the word is a number.
+  if (blaze_pointer_descriptor(object) == NULL) object = blaze_pointer_of_handle(value);
   if (blaze_pointer_descriptor(object) != NULL) {
     blaze_rt_json_reference(&build, object, indent, 0);
     const char* written = blaze_rt_string_new((const unsigned char*)build.text, build.length);
