@@ -47,8 +47,10 @@ or one language capability that the rung below it does not need.
 
 ## Where the source stands
 
-The measured tree is 97 compiler sources, and the frontend reads all 97 whole:
-`test/self-host.test.ts` reports **0 refusals**. The sources are already written
+The measured tree is 107 compiler sources. The frontend reads 99 of them whole
+and refuses 13 constructs in the remaining 8, so `test/self-host.test.ts` does
+not pass yet; those refusals are the current queue for rung 4 (see "The current
+refusals" and "Where the self-build stands"). The sources are already written
 as **erasable TypeScript**: `erasableSyntaxOnly` is on in
 `src/compiler/tsconfig.json`, so no `enum`, `namespace`, parameter property or
 `import =` carries runtime behaviour, and every `interface`, type alias,
@@ -144,67 +146,64 @@ The linked module graph reads the compiler's sources whole, including:
   and a field a constant object does not write is the absence the optional
   property is.
 
-### The next refusal
+### The current refusals
 
-`blaze ir` on `src/compiler` now contracts the whole module graph and stops at
-`semantics/contract.ts` on `BigInt`. The contract evaluator reads a literal's
-digits with `BigInt(token.text)` and wraps with `BigInt.asIntN`/`asUintN`; the
-language has whole numbers of 64 and 256 bits, but no constructor from a
-runtime text and no signed wide carrier.
+`blaze ir` on `src/compiler` contracts the whole module graph and stops at the
+constructs below. They are the current queue for rung 4: each is a construct
+the compiler writes and the frontend does not yet read, so each is a reason to
+teach the language or the value model, never to rewrite the source. The counts
+come from `test/self-host-gap.ts`.
 
-The width question is the hard half. The language's `bigint` is held at the
-machine word until a file's literals reach past it, then at the unsigned
-256-bit number. The evaluator's integers are signed and can reach the top of
-the 256-bit range: a span is negative, `BigInt.asIntN` produces negative
-values, and `asUintN` may produce the whole unsigned range. A `u256` carrier
-compares unsigned, so `span < 0n` is false for a negative span held as its
-complement, and `asIntN`/`asUintN` cannot answer what they answer in the
-source. The slice is a signed wide carrier for the language's `bigint` (the
-`i256` primitive the contract type table already names), chosen where a file
-holds signed values, with the constructor, the wrap and the comparisons read at
-it. `Number(bigint)` is carried now: a wide value is the decimal the
-runtime's formatter writes, and the C library's `strtod` reads it back, so the
-conversion rounds the way `Number(BigInt)` rounds rather than through the low
-machine word. The C and machine backends answer it; a wasm host service is
-still open.
+- An `instanceof` that names a class of the module, and `in` over a value whose
+  fields the type does not write down (`core/structural-hash.ts`, 3).
+- A method call whose receiver's type does not state the method: `admit`
+  (`codegen.ts`), `prelude` (`toolchain/program-emit.ts`), `resolveImport`
+  (`semantics/module-graph.ts`) and `validate` (`toolchain/wasm.ts`, 4).
+- `Array.from` over a length description, a text or a list, and an object
+  spread over a constant object (`semantics/typescript.ts`, 2).
+- A constructor value called where the type states a constructor
+  (`toolchain/wasm.ts`, 1).
+- `function*` and `yield*` (`core/json-store.ts`, 2): a generator is not yet
+  part of a program.
+- A map whose values are `slice<text>` indexed by a key
+  (`semantics/ir-validate.ts`, 1).
 
-The next language slice is `structuredClone`, which `compiler.ts`,
-`codegen.ts` and `semantics/repair.ts` use to copy an IR tree before a pass
-rewrites it. A compiled function has no deep-copy service. The slice is a clone
-over the runtime's values: a dynamic object and a dictionary copy their
-entries, a list copies its block, and a laid-out record copies its fields at
-the layout it already has.
+The earlier blockers on this queue have landed: `BigInt(text)`, the wraps and
+signed comparisons in the contract evaluator, `Number(bigint)` and
+`structuredClone`. They are described under "Where the self-build stands" and
+have small regressions in `test/self-build-regressions.test.ts`.
 
 ## The next slices
 
 In the order they block rung 4:
 
-1. **The contract evaluator's integers.** `BigInt(text)`, `BigInt.asIntN` /
-   `asUintN` and signed comparisons, so `semantics/contract.ts` builds.
-   `Number(bigint)` is done; this is the current blocker.
-2. **`structuredClone` over the runtime's values.** Records, dictionaries and
-   lists, so `compiler.ts`, `codegen.ts` and `semantics/repair.ts` build.
-3. **An object the file returns whole.** A compiled function cannot read a
+1. **The current refusals.** The 13 constructs listed above, spread over the
+   frontend, the contract evaluator and the wasm backend. They stop the
+   compiler from reading all the functions in its own module graph, so nothing
+   past them can be measured by a self-build.
+2. **An object the file returns whole.** A compiled function cannot read a
    module object by name; the literal at the name is the use, but inlining it
    must not stop the constant tables (a membership question, a bracket read,
-   `Object.hasOwn`) reading the keys the declaration wrote. The evaluator's one
-   such site answers the literal; a general reading is this slice.
-4. **The remaining host services.** The native adapter carries the file,
+   `Object.hasOwn`) reading the keys the declaration wrote. Module constants
+   now inline whole, including quoted keys and nested literals; a general
+   reading for an object a function returns is still open.
+3. **The remaining host services.** The native adapter carries the file,
    process, clock, path, command, environment, random, hash and text
-   services. What is left is `process.execPath` in `codegen.ts`, the wasm
+   services, and `process.execPath` is among them now. What is left is the wasm
    host's Node entry, and any service the compiler sources ask for that the
    adapter does not yet answer.
-5. **The value-model residuals.** A function reference written directly in a
+4. **The value-model residuals.** A function reference written directly in a
    program body (a bare code address rather than a closure) is not a value a
    field holds; an empty list in a field and a list stored in a dictionary
    still have layout edges; and a value whose type is an intersection with a
    union is still read as the whole union.
-6. **The self-build project.** `src/compiler/blaze.toml` names the entry
-   (`cli.ts`), the host mappings and the machine output. It needs the
-   toolchain services a build uses (`cc`, `as`, `ld` and `nim` when asked),
-   atomic writes to `.blaze/`, and a decision on the fingerprint: read the
-   installed sources at run time, or embed the fingerprint at build time.
-7. **The fixed point test.** Node builds stage 1, stage 1 builds stage 2, and
+5. **The self-build project.** `src/compiler/blaze.toml` names the entry
+   (`cli.ts`), the host mappings (`#host/model`, `#host/platform` and
+   `#host/toml`) and the machine output. It needs the toolchain services a
+   build uses (`cc`, `as`, `ld` and `nim` when asked), atomic writes to
+   `.blaze/`, and a decision on the fingerprint: read the installed sources at
+   run time, or embed the fingerprint at build time.
+6. **The fixed point test.** Node builds stage 1, stage 1 builds stage 2, and
    stage 2 builds stage 3. Compare the three on the conformance corpus:
 
    - exit status, stdout and stderr of every command;
@@ -271,12 +270,15 @@ binary is made of.
 - **Module values cross by getter or by inlining.** A written constant is
   inlined; state and constructed values are read through a getter; a re-export
   follows the chain to the declaring module. An object returned whole is still
-  open (slice 3).
+  open (slice 2).
 - **Whole numbers are fixed-width.** `bigint` is a 64-bit whole until a file's
-  literals pass it, then a 256-bit unsigned one. A computed value of a narrower
-  whole type beside a wide one is refused with the kernel's message; a written
-  choice of numbers is widened in both arms. A signed wide carrier is the next
-  integer slice.
+  literals pass it, then a 256-bit one; the contract evaluator holds it as a
+  sign-and-magnitude value so the wraps, shifts and comparisons keep the sign
+  the source gives them. A computed value of a narrower whole type beside a
+  wide one is refused with the kernel's message; a written choice of numbers is
+  widened in both arms. `BigInt(text)`, the wraps and signed comparisons, and
+  `Number(bigint)` are answered by the C and machine backends; a wasm host
+  service for the last is still open.
 - **A bool is not a number in a contract.** `result == true`, not `result == 1`.
 - **The text codecs are markers.** `TextEncoder`/`TextDecoder` are tracked at
   compile time; their values are the zero they hold and never a contract type.
@@ -287,12 +289,12 @@ binary is made of.
 
 ## Where the self-build stands
 
-The gap report is at zero refusals: the frontend reads all 106 sources of the
-compiler; the tests and benchmarks are outside the binary. The contract and IR
-phases now read the functions that used to stop a self-build — `verifyCandidate`
-and the wasm backend's `Body` methods among them — and each fix has a small
-regression test in `test/self-build-regressions.test.ts`. These slices have
-landed:
+The gap report currently reads 99 of 107 compiler sources whole and refuses 13
+constructs in the other 8, so `test/self-host.test.ts` fails; the tests and
+benchmarks are outside the binary. The contract and IR phases read the functions
+that used to stop a self-build — `verifyCandidate` and the wasm backend's `Body`
+methods among them — and the fixes have small regressions in
+`test/self-build-regressions.test.ts`. These slices have landed:
 
 - the contract evaluator holds integers in a sign-and-magnitude 256-bit value,
   with the wraps, shifts, comparisons, reductions and the exact
@@ -313,8 +315,7 @@ landed:
   the first read writes the value into a named state cell and marks it, every
   later read answers the cell, and a function reads the getter rather than a
   module name. The host-service and runtime-ABI tables are literal sources, so
-  the wasm backend's host services are constants rather than derived state.
-
+  the wasm backend's host services are constants rather than derived state;
 - contract, call-graph and IR values whose TypeScript type is a union of
   records are read by key rather than by member: a reference with no shape
   cannot choose between arms that share a field name, and the type text,
@@ -322,7 +323,7 @@ landed:
   already uses for a dynamic object;
 - deep freezing moved behind the host boundary (`freezeValue`): the Node
   adapter keeps contracts immutable and a compiled binary, which has no freeze
-  state, treats the call as a no-op.
+  state, treats the call as a no-op;
 - the type rules agree with the value model: a reference written without an
   element is the unshaped `ref<any>` whether its `of` field is absent or null,
   and a value the runtime holds is read as the text, number or truth it is
@@ -330,11 +331,22 @@ landed:
   asks. A counted loop's index is in scope in its bound and its step in the
   object pass, the frontend reduction and the IR validator, and an arrow's
   boxed capture selects the declaration of the name in the scope the arrow
-  stands in.
+  stands in;
+- handles are resolved across the boundary: a raw pointer carried as a double,
+  a dynamic handle at a named-reference cast, a handle in the JSON record walk
+  and the SHA-256 digest, the `typeof` answer for null and for a handle, and a
+  state cell's whole tagged value. Wrapper symbols are registerable as
+  externals without entering the public ABI table;
+- `structuredClone` of a source held behind a handle is boxed and answered as
+  tagged values, and a wide module value crosses the host boundary as its
+  decimal text;
+- module state cells lower in the machine backend, whole-number results keep
+  their exact value and sign across the boundary, and the wasm backend names a
+  parsed value's kind and decodes listing opcodes by their hex spelling.
 
 The object layout pass and the C driver build: both read their statements,
 shapes, calls, callbacks and request records through keyed reads, and the
-verifier reads its run results the same way. The self-build has moved into
-`toolchain/ir-wasm.ts`: the module's function lookup, the body's scopes,
-parameters, program calls, locals and carrier facts build, and the remaining
-work is the body's value emitter. Fixed point is not reached yet.
+verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
+module's function lookup, the body's scopes, parameters, program calls, locals
+and carrier facts build, and the next local gate is the body's value emitter.
+The whole-tree gate is the 13 refusals above; fixed point is not reached yet.
