@@ -12,6 +12,7 @@ import { test } from "node:test";
 import { phaseOf, programOf, semanticsOf } from "./phase.ts";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { readTypeScriptModule } from "../semantics/typescript.ts";
+import { printSemanticFunction } from "../semantics/ir-text.ts";
 
 /** Contracts and resolves a program, returning the IR of one function. */
 function resolved(source: string, name: string) {
@@ -237,6 +238,27 @@ test("a rest function type is called at the arity the source wrote", () => {
     for (const one of Object.values(value)) arityOf(one);
   };
   arityOf(handle?.body ?? []);
+});
+
+test("a reference written into a number slot crosses as its handle", () => {
+  // `Record<string, unknown>` is a dictionary handle in the contract, while a
+  // named record is a reference. Writing one into the other asks the runtime
+  // for the handle the reference names.
+  const source = [
+    "interface Project { name: string }",
+    "export function demo(p: Project): string {",
+    "  let fields: Record<string, unknown> = {};",
+    "  fields = p;",
+    '  return String(fields["name"]);',
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the assignment resolves");
+  const ir = printSemanticFunction(fn);
+  assert.match(ir, /blaze_rt_number_of_ref/, "the reference becomes a handle");
 });
 
 test("a field read on an empty fallback goes by name", () => {

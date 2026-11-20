@@ -376,8 +376,9 @@ shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear. A self-build now passes contract and most IR
-lowering, and fails on a cast in `runBuild` that crosses a named reference to a
-pointer (`projectFields holds a f64` and `blaze_pointer_of_handle` reading a
-reference). What remains is that cast, the later spec slices, and the fixed
-point test. Fixed point is not reached yet.
+The frontend gate is clear. A self-build now lowers `runBuild` and `runStored`,
+and fails in `runSemanticIr` where a cast hands a named reference to
+`blaze_pointer_of_handle`. A record written into a dictionary slot crosses
+through `blaze_rt_number_of_ref`, and a cast of a value that is already a
+reference no longer crosses it to a pointer. What remains is that cast, the
+later spec slices, and the fixed point test. Fixed point is not reached yet.

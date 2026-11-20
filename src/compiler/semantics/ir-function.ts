@@ -786,10 +786,17 @@ class FunctionBody {
         // A number written into a string is written as its text, as `s += 1`
         // is in the language the body was written in, rather than as a refusal
         // the source does not raise.
-        const written =
+        let written =
           heldSlot.kind === "text" && !isText(value.type)
             ? { k: "text" as const, type: TEXT, parts: [{ k: "value" as const, value }] }
             : value;
+        // A reference written into a number slot is the pointer it carries:
+        // `const fields: Record<string, unknown> = {}; fields = aRecord;`
+        // is the same address the dictionary's keyed reads take.
+        const slot = slotType(heldSlot);
+        if (slot.kind === "primitive" && slot.name === "f64" && value.type.kind === "ref" && String(fieldOfValue(statement, "op")) === "=") {
+          written = fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [value], F64), "value") as SemanticValue;
+        }
         // A wide number has no compound operator a backend can write, and a
         // floor division has no compound form C has, so the compound is
         // written as the binary form every backend either writes or refuses

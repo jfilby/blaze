@@ -559,6 +559,8 @@ proc blaze_rt_object_describe*(target: pointer, descriptor: cstring) {.exportc, 
     return
   headerOf(target)[].descriptor = cast[pointer](descriptor)
 
+proc blaze_rt_number_of_ref*(value: BlazeValue): float64 {.exportc, cdecl.} = blazeDynamicFromValue(value)
+
 proc blaze_rt_object_set_from_handle*(handle: float64, field: cstring, value: float64): float64 {.exportc, cdecl.} =
   discard field
   discard value

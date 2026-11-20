@@ -15164,10 +15164,23 @@ class TypeScriptParser {
         // A value that already names a reference is the address the layout
         // expects: crossing it to a pointer would hand the callee a handle
         // where it reads a pointer.
-        const namedSource = assertedFrom.kind === "ref" && assertedFrom.name !== undefined && !unknownReference(assertedFrom);
+        const namedSource = (assertedFrom.kind === "ref" && assertedFrom.name !== undefined && !unknownReference(assertedFrom)) || ["index", "object", "member"].includes(current().k);
+        // A named record viewed as `Record<string, V>` is a dictionary handle:
+        // the pointer is the number the runtime's keyed reads take.
+        if (shape !== null && shape.kind === "record" && shape.index !== null &&
+            assertedFrom.kind === "ref" && assertedFrom.name !== undefined) {
+          const asNumber: Expression = { k: "call", name: "blaze_rt_number_of_ref", args: [current()], returns: NUMBER_RESULT };
+          this.expressionTypes.set(asNumber, NUMBER_RESULT);
+          replace(asNumber);
+          continue;
+        }
         if (type.kind === "ref" && type.name !== undefined && unknownReference(assertedFrom) && !alreadyPointer && !namedSource) {
           const resolved: Expression = { k: "call", name: "blaze_pointer_of_handle", args: [current()] };
-          this.expressionTypes.set(resolved, type);
+          // The service answers an unshaped pointer. The layout the assertion
+          // named travels as the shape beside it, not as the expression's type:
+          // stating the named reference here would make a caller read the
+          // pointer as a typed handle.
+          this.expressionTypes.set(resolved, ANY_TYPE);
           // The assertion named the layout the value holds: carry its shape
           // onto the pointer read, so a field of it keeps the type the source
           // wrote even though the handle was crossed to a pointer here.

@@ -1606,6 +1606,14 @@ entry(
     { tags: ["object"] },
   ),
   entry(
+    "blaze_rt_number_of_ref",
+    "double",
+    [["ref", "BlazeValue"]],
+    "Reads a named reference as the number its pointer is.",
+    "A record the source views as a dictionary is the same pointer, carried as the number the runtime's dictionaries use.",
+    { tags: ["object"] },
+  ),
+  entry(
     "blaze_rt_object_set_from_handle",
     "double",
     [
@@ -9828,6 +9836,10 @@ double blaze_rt_object_has_field_from_handle(double handle, const char* field) {
    descriptor, so the field is found by name and read at the type it holds. A
    reference and a text are returned as the handles the runtime keeps for them,
    which is what a compiled value holds when it crosses this boundary. */
+double blaze_rt_number_of_ref(BlazeValue ref) {
+  return blaze_dynamic_from_value(ref);
+}
+
 double blaze_rt_object_set_from_handle(double handle, const char* field, double value) {
   BlazeValue owner = blaze_value_from_dynamic(handle);
   void* object = blaze_pointer_of_value(&owner, BLAZE_HANDLE_RECORD, "blaze_rt_object_set");
