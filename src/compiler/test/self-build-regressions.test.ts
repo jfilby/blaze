@@ -131,6 +131,24 @@ test("instanceof a built-in collection reads for a value the type does not name"
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });
 
+test("a non-exported generator is a function of the module", () => {
+  // A library module has no program body: a function written after `function*`
+  // must be prescanned as the module's function, not left as top-level code.
+  const source = [
+    "export function head(): string {",
+    "  return first().join(\",\");",
+    "}",
+    "function* first(): Generator<string> {",
+    '  yield "a";',
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  assert.ok(read.analysis.functions.some((fn) => fn.name === "first"), "the generator is a module function");
+  assert.equal(read.analysis.body.length, 0, "a library module has no program body");
+});
+
 test("a generator reads as the list its yields write", () => {
   // The JSON store walks a value in bounded batches with `yield` and `yield*`.
   // A generator is read as the list it yields, so the `Generator<string>` a

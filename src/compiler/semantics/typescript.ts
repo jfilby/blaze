@@ -7096,9 +7096,14 @@ class TypeScriptParser {
       // inside a call, or as the value of a field. Only a declaration carries a
       // name the whole file knows.
       if (before !== null && !["export", "default", "async", "declare", ";", "}"].includes(before.text)) continue;
-      const name = tokens[at + 1] as Token | undefined;
+      // `function* name()` names the function after the star, which is where a
+      // generator writes it. Without this skip the declaration is not prescanned
+      // and its body is left in the program body of a library module.
+      let nameAt = at + 1;
+      if (text(nameAt) === "*") nameAt += 1;
+      const name = tokens[nameAt] as Token | undefined;
       if (name === undefined || name.kind !== "ident") continue;
-      let open = at + 2;
+      let open = nameAt + 1;
       const typeParameters = new Set<string>();
       if (text(open) === "<") {
         // The erased type parameters of a generic function. A function that
@@ -12458,8 +12463,7 @@ class TypeScriptParser {
       // source says the value is settles the answer where it says anything; an
       // untyped value is one of them when it is there at all, which is the same
       // answer the other built-in classes give.
-      const known = local || name.text === "Error" || name.text === "Date" ||
-        name.text === "Map" || name.text === "Set" || name.text === "WeakMap" || name.text === "WeakSet" || dotted;
+      const known = local || ["Error", "Date", "String", "Number", "Boolean", "Map", "Set", "WeakMap", "WeakSet"].includes(name.text) || dotted;
       if (!known) {
         this.report("instanceof names a class of this module", `near "${name.text}"`, name);
         continue;
