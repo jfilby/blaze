@@ -341,6 +341,13 @@ methods among them — and the fixes have small regressions in
   there at all;
 - a cast to a function type keeps its shape through the handle-to-pointer read,
   so a callback read off an opaque request is called through its value;
+- `globalThis` is a host object whose fields are services: `globalThis.WebAssembly`
+  reads through `webAssemblyEngine` even when the source casts and brackets it;
+- a name bound to an arrow is that function when read as a value, so a walker
+  that hands itself to `some` does not name an unbound local;
+- a function that reads a module value stays with the module — module values are
+  reached through their getters, including a numeric cell — so the object pass
+  can call it from the program;
 - a generator is read as the list it yields: `yield` writes one element,
   `yield*` writes every element the delegated list holds, and `Generator<T>`
   states the element type the caller walks. The JSON store's batched writes
@@ -351,5 +358,7 @@ shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear; what remains is making a native build of the whole
-tree and comparing the fixed point. Fixed point is not reached yet.
+The frontend gate is clear. A self-build now passes the contract phase and fails
+in the IR: `ProgramLowering_value` reads `ref<any>.awaiting`, which two layouts
+could each hold. What remains is that keyed read, the later spec slices, and the
+fixed point test. Fixed point is not reached yet.

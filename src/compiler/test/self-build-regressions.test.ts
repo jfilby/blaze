@@ -131,6 +131,47 @@ test("instanceof a built-in collection reads for a value the type does not name"
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });
 
+test("a field of globalThis reads through its host service", () => {
+  // The wasm boundary reads the host's WebAssembly off `globalThis`. A field of
+  // the host object is a service the platform answers, not a name a compiled
+  // function holds, so the cast and the bracket read still lower to that call.
+  const source = [
+    "interface Engine { validate(bytes: number[]): boolean }",
+    "export function probe(bytes: number[]): boolean {",
+    '  const engine = (globalThis as unknown as Record<string, unknown>)["WebAssembly"] as Engine | undefined;',
+    "  return engine === undefined ? false : engine.validate(bytes);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "probe");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  assert.match(JSON.stringify(handle?.body ?? []), /webAssemblyEngine/);
+});
+
+test("a recursive arrow passed as a callback reads as a function value", () => {
+  // The probe walker hands itself to `some`. Inside its own body the name is a
+  // function value, not an unbound name the object pass would refuse.
+  const source = [
+    "export function walk(value: unknown[]): boolean {",
+    "  const visit = (node: unknown): boolean => {",
+    "    if (Array.isArray(node)) return node.some(visit);",
+    "    return node !== null;",
+    "  };",
+    "  return visit(value);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const closure = read.analysis.functions.find((one) => one.name.startsWith("__closure_module"));
+  assert.ok(closure !== undefined, "the arrow is lifted to a function");
+  const handle = closure.handle as { body?: unknown } | undefined;
+  const body = JSON.stringify(handle?.body ?? []);
+  assert.doesNotMatch(body, /"name":"visit"/, "the self-reference is not an unbound name");
+});
+
 test("a callback read through a cast is called through the value", () => {
   // The target review callback is read off an opaque request with a cast to a
   // function type. The cast's shape has to survive the handle-to-pointer read,

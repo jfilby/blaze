@@ -335,6 +335,18 @@ const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/"];
  * happened to be next, so `catch` said "expected the name of a function" and
  * `function*` said the same, and neither named the thing that was written.
  */
+/** The marker a read of the host object leaves for its field read. */
+const GLOBAL_THIS_NAME = "__globalThis";
+
+/**
+ * A field of `globalThis` is a service the host boundary answers, not a value
+ * a compiled function holds. The names here are the ones the compiler sources
+ * read; a field with no service stays a refusal rather than guessing one.
+ */
+const GLOBAL_THIS_SERVICES: Readonly<Record<string, string>> = {
+  WebAssembly: "webAssemblyEngine",
+};
+
 export const REFUSED_KEYWORDS: Record<string, string> = {
   switch: "a chain of comparisons, as in `if (x === 1) { ... } else { ... }`",
   // try/catch/finally are supported: see docs/specs/try-catch.md
@@ -1935,62 +1947,6 @@ function importedRenames(tokens: readonly Token[]): Map<string, string> {
     if (tokens[index]?.text === ";") index += 1;
   }
   return renames;
-}
-
-/**
- * Whether a function reads a value the running program holds.
- *
- * A top-level `const` of a constant expression, a function and a class are
- * values a module function can read: the first is written into the function,
- * and the other two are declarations of the same program. A `let`, or a `const`
- * of a value computed at run time, is a value the program holds while it runs,
- * and a function that reads one is compiled where that value is — the program's
- * own functions are handed what they read of the program around them.
- */
-function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean {
-  // A numeric global is read through a cell call rather than a name in the
-  // state set, so the walk still has to run when the set is empty.
-  if (state.size === 0) {
-    let cell = false;
-    walkFunction(fn, () => {}, (name) => {
-      if (name === "blaze_rt_global_get" || name === "blaze_rt_global_set" || name === "blaze_rt_global_post_inc" || name === "blaze_rt_global_post_dec") cell = true;
-    });
-    return cell;
-  }
-  // A name a function declares is its own only where the scope that declares it
-  // is around the read: a parameter named like a value the program holds is the
-  // parameter, and a name declared inside a block is that block's. A read no
-  // scope binds is the file's value, and the function that reads it is read
-  // where the program runs.
-  let found = false;
-  walkFunction(
-    fn,
-    (name, bound) => {
-      if (!bound && state.has(name)) found = true;
-    },
-    // A module-level number the function reads or writes is a cell, not a name:
-    // the call is the read or the write of the value the program holds.
-    (name, call) => {
-      // A read of a number the module computes is rewritten to the getter
-      // before this walk sees the body. A compiled function owns no module
-      // scope, so it belongs to the program that holds the value as a name of
-      // its own. A collection is read through its getter instead: the loop
-      // walks the shape the module wrote.
-      if (name.startsWith("__value_") && state.has(name.slice("__value_".length))) {
-        const returns = fieldOf(call, "returns") as TypeExpr | undefined;
-        if (returns !== undefined && returns.kind === "primitive") found = true;
-      }
-      if (
-        name === "blaze_rt_global_get" ||
-        name === "blaze_rt_global_set" ||
-        name === "blaze_rt_global_post_inc" ||
-        name === "blaze_rt_global_post_dec"
-      ) {
-        found = true;
-      }
-    },
-  );
-  return found;
 }
 
 /** Every function a body calls, by the name the source wrote. */
@@ -7327,7 +7283,6 @@ class TypeScriptParser {
     // compiled function can call: it is the module's value, not one the program
     // holds as a name. A function that reads it stays a function of the module.
     for (const name of this.constantCollections.keys()) moduleState.delete(name);
-    const readsProgramState = entries.length > 0 && entries.some((entry) => readsState(fieldOf(entry, "handle") as TypeScriptFunction, moduleState));
     const refused = trial.entries.length > 0;
     // An exported function is the module's interface. Handing it to the program
     // parser would not read the module's own refusal: the program parser does
@@ -7337,7 +7292,11 @@ class TypeScriptParser {
     // An export is the module's interface: a function the file offers is read
     // as the module's even where it reads a value the running program holds,
     // because the name it offers is a contract the rest of the program calls.
-    const program = refused ? !exported : (readsProgramState && !exported);
+    // A module value a function reads is reached through the getter the module
+    // wrote, including a numeric cell, so reading one no longer makes the
+    // function a function of the program that runs. Only a construct the module
+    // could not read at all is left for the program parser.
+    const program = refused && !exported;
     if (program) {
       functions.length = before;
       // The arrows the refused declaration wrote are read again, by the parser
@@ -10766,44 +10725,51 @@ class TypeScriptParser {
     const list: TypeExpr = { kind: "slice", of: element };
     const out = `__yielded${this.fieldCount++}`;
     const helper = this.appendHelper("push", element, 1, line)?.name ?? "";
-    const push = (value: Expression, at: number): Statement =>
-      this.appendWrite({ k: "append", target: out, base: null, helper, op: "push", values: [value], element }, at);
-    const rewrite = (ones: readonly Statement[]): Statement[] => {
-      const written: Statement[] = [];
-      for (const statement of ones) {
-        if (statement.kind === "expression") {
-          const value = statement.value;
-          if (value.k === "call" && (value.name === "__yield" || value.name === "__yieldAll")) {
-            const arg = (value.args as Expression[])[0] ?? this.zeroFor(element);
-            if (value.name === "__yield") written.push(push(arg, statement.line));
-            else {
-              const held = `__yieldFrom${this.fieldCount++}`;
-              const item = `__yieldItem${this.fieldCount++}`;
-              written.push({ kind: "declare", name: held, type: list, init: arg, line: statement.line });
-              written.push({
-                kind: "forOf",
-                variable: item,
-                of: held,
-                body: [push({ k: "ident", name: item }, statement.line)],
-                line: statement.line,
-              });
-            }
-            continue;
-          }
-        }
-        if (statement.kind === "result") {
-          written.push({ kind: "result", value: { k: "ident", name: out }, line: statement.line });
-          continue;
-        }
-        written.push(this.rewriteGeneratorBodies(statement, rewrite));
-      }
-      return written;
-    };
-    const rewritten = rewrite(body);
+    const rewritten = this.rewriteGenerator(body, out, element, list, helper);
     const first: Statement = { kind: "declare", name: out, type: list, init: this.zeroFor(list), line };
     const last: Statement = { kind: "result", value: { k: "ident", name: out }, line };
     const ended = rewritten.length > 0 && rewritten[rewritten.length - 1]?.kind === "result";
     return [first, ...rewritten, ...(ended ? [] : [last])];
+  }
+
+  /**
+   * Walks one generator body, writing yields as appends. The walk is a method
+   * rather than a local arrow: a local that calls itself is a closure that
+   * reads itself before it is declared, which a compiled function cannot hold.
+   */
+  private rewriteGenerator(ones: readonly Statement[], out: string, element: TypeExpr, list: TypeExpr, helper: string): Statement[] {
+    const push = (value: Expression, at: number): Statement =>
+      this.appendWrite({ k: "append", target: out, base: null, helper, op: "push", values: [value], element }, at);
+    const written: Statement[] = [];
+    for (const statement of ones) {
+      if (statement.kind === "expression") {
+        const value = statement.value;
+        if (value.k === "call" && (value.name === "__yield" || value.name === "__yieldAll")) {
+          const arg = (value.args as Expression[])[0] ?? this.zeroFor(element);
+          if (value.name === "__yield") written.push(push(arg, statement.line));
+          else {
+            const held = `__yieldFrom${this.fieldCount++}`;
+            const item = `__yieldItem${this.fieldCount++}`;
+            written.push({ kind: "declare", name: held, type: list, init: arg, line: statement.line });
+            written.push({
+              kind: "forOf",
+              variable: item,
+              of: held,
+              body: [push({ k: "ident", name: item }, statement.line)],
+              line: statement.line,
+            });
+          }
+          continue;
+        }
+      }
+      if (statement.kind === "result") {
+        written.push({ kind: "result", value: { k: "ident", name: out }, line: statement.line });
+        continue;
+      }
+      const nested = (body: readonly Statement[]): Statement[] => this.rewriteGenerator(body, out, element, list, helper);
+      written.push(this.rewriteGeneratorBodies(statement, nested));
+    }
+    return written;
   }
 
   /** Applies a generator body rewrite to every nested body of one statement. */
@@ -13157,6 +13123,15 @@ class TypeScriptParser {
         this.next();
         const index = this.readExpression();
         this.expect("]");
+        // A field of the host object is the service that answers it: the casts
+        // the source writes around `globalThis` only say what the field holds.
+        if (target.k === "ident" && target.name === GLOBAL_THIS_NAME) {
+          const service = GLOBAL_THIS_SERVICES[textValue(index) ?? ""];
+          if (service !== undefined) {
+            replace({ k: "call", name: service, args: [] });
+            continue;
+          }
+        }
         // `TABLE[key]` over an object the file wrote is the chain of the keys
         // it wrote: the key the source computed is compared against each name,
         // and a key the object does not hold is the absence it is.
@@ -15356,6 +15331,13 @@ class TypeScriptParser {
             continue;
           }
         }
+        if (target.k === "ident" && target.name === GLOBAL_THIS_NAME) {
+          const service = GLOBAL_THIS_SERVICES[field.text];
+          if (service !== undefined) {
+            replace({ k: "call", name: service, args: [] });
+            continue;
+          }
+        }
         replace({ k: "member", base: target, field: memberNameOf(field.text) });
         continue;
       }
@@ -16038,6 +16020,9 @@ class TypeScriptParser {
       };
       if (restAt >= 0) provisional.rest = restAt;
       this.valueArrows.set(declared, provisional);
+      // A self-reference read as a value already names the lifted function, so
+      // its signature has to be findable before the body finishes reading.
+      this.arrowBindings.set(liftedName, provisional);
     }
     this.valueFunctions = new Map(savedFunctions);
     this.valueCollections = new Map(savedCollections);
@@ -21551,6 +21536,14 @@ class TypeScriptParser {
       // one, and the resolver reads which value that is.
       return { k: "call", name: "Promise.await", args: [this.readUnary()] };
     }
+    if (token.kind === "ident" && token.text === "globalThis") {
+      // The host object is not a value a compiled function holds: a field read
+      // off it is the host service of that name. A marker carries the read to
+      // the member or bracket that names the service.
+      const marker: Expression = { k: "ident", name: GLOBAL_THIS_NAME };
+      this.expressionTypes.set(marker, { kind: "ref", of: null, name: GLOBAL_THIS_NAME });
+      return marker;
+    }
     if (token.kind === "ident") {
       // `true` and `false` are the numbers a truth is held as, and the marker
       // keeps them truths: a field a literal writes is a truth, and the text it
@@ -21794,6 +21787,14 @@ class TypeScriptParser {
         };
         this.expressionTypes.set(value, NUMBER_RESULT);
         return value;
+      }
+      // A name bound to an arrow is that function when it is read as a value —
+      // handed to a callback, for instance, or named inside the arrow itself.
+      // A call of the name is read by the postfix, which hands it what the
+      // function captured, so only a value read becomes a closure here.
+      const arrowBinding = this.valueArrows.get(token.text);
+      if (arrowBinding !== undefined && !this.at("(")) {
+        return { k: "arrow", name: String(fieldOf(arrowBinding, "function")), captures: fieldOf(arrowBinding, "captures") as string[] };
       }
       // A name an import binds is not a value this read can answer yet: the
       // link is where the getter it is read through arrives.

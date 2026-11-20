@@ -1317,41 +1317,47 @@ class ProgramParser {
    */
   private lowerGenerator(body: readonly ProgramStatement[], line: number): ProgramStatement[] {
     const out = `__yielded${this.generatorCount++}`;
-    const push = (value: ProgramValue, at: number): ProgramStatement => ({
-      kind: "invoke", function: "array.push", args: [{ k: "name", name: out }, value], line: at,
-    });
-    const rewrite = (ones: readonly ProgramStatement[]): ProgramStatement[] => {
-      const written: ProgramStatement[] = [];
-      for (const statement of ones) {
-        if (statement.kind === "invoke" && (statement.function === "__yield" || statement.function === "__yieldAll")) {
-          const arg = statement.args[0] ?? { k: "null" };
-          if (statement.function === "__yield") written.push(push(arg, statement.line));
-          else {
-            const held = `__yieldFrom${this.generatorCount++}`;
-            const item = `__yieldItem${this.generatorCount++}`;
-            written.push({ kind: "declare", name: held, mutable: false, type: null, value: arg, line: statement.line });
-            written.push({ kind: "forOf", variable: item, of: held, body: [push({ k: "name", name: item }, statement.line)], line: statement.line });
-          }
-          continue;
-        }
-        if (statement.kind === "result") {
-          written.push({ kind: "result", value: { k: "name", name: out }, line: statement.line });
-          continue;
-        }
-        const copy = { ...statement } as Record<string, unknown>;
-        for (const key of ["body", "then", "otherwise", "catchBody", "finallyBody"]) {
-          const nested = fieldOf(copy, key);
-          if (Array.isArray(nested)) copy[key] = rewrite(nested as ProgramStatement[]);
-        }
-        written.push(copy as unknown as ProgramStatement);
-      }
-      return written;
-    };
-    const rewritten = rewrite(body);
+    const rewritten = this.rewriteGenerator(body, out);
     const first: ProgramStatement = { kind: "declare", name: out, mutable: false, type: null, value: { k: "words", values: [] }, line };
     const last: ProgramStatement = { kind: "result", value: { k: "name", name: out }, line };
     const ended = rewritten.length > 0 && rewritten[rewritten.length - 1]?.kind === "result";
     return [first, ...rewritten, ...(ended ? [] : [last])];
+  }
+
+  /**
+   * Walks one generator body, writing yields as appends. The walk is a method
+   * so it never needs a local arrow that calls itself: a compiled function has
+   * no scope to hold a closure that reads its own name before it is declared.
+   */
+  private rewriteGenerator(ones: readonly ProgramStatement[], out: string): ProgramStatement[] {
+    const push = (value: ProgramValue, at: number): ProgramStatement => ({
+      kind: "invoke", function: "array.push", args: [{ k: "name", name: out }, value], line: at,
+    });
+    const written: ProgramStatement[] = [];
+    for (const statement of ones) {
+      if (statement.kind === "invoke" && (statement.function === "__yield" || statement.function === "__yieldAll")) {
+        const arg = statement.args[0] ?? { k: "null" };
+        if (statement.function === "__yield") written.push(push(arg, statement.line));
+        else {
+          const held = `__yieldFrom${this.generatorCount++}`;
+          const item = `__yieldItem${this.generatorCount++}`;
+          written.push({ kind: "declare", name: held, mutable: false, type: null, value: arg, line: statement.line });
+          written.push({ kind: "forOf", variable: item, of: held, body: [push({ k: "name", name: item }, statement.line)], line: statement.line });
+        }
+        continue;
+      }
+      if (statement.kind === "result") {
+        written.push({ kind: "result", value: { k: "name", name: out }, line: statement.line });
+        continue;
+      }
+      const copy = { ...statement } as Record<string, unknown>;
+      for (const key of ["body", "then", "otherwise", "catchBody", "finallyBody"]) {
+        const nested = fieldOf(copy, key);
+        if (Array.isArray(nested)) copy[key] = this.rewriteGenerator(nested as ProgramStatement[], out);
+      }
+      written.push(copy as unknown as ProgramStatement);
+    }
+    return written;
   }
 
   /**
