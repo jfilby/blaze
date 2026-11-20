@@ -591,6 +591,10 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_set_seq_numkey(blaze_value_from_dynamic(${args[0]}), ${args[1]}, (void*)(uintptr_t)(${args[2]}), ${args[3]}, ${args[4]})`;
     case "blaze_rt_dict_get_seq_numkey":
       return `((void*)blaze_rt_dict_get_seq_numkey(blaze_value_from_dynamic(${args[0]}), ${args[1]}))`;
+    case "blaze_rt_dict_set_seq_refkey":
+      return `blaze_rt_dict_set_seq_refkey(blaze_value_from_dynamic(${args[0]}), ${args[1]}, (void*)(uintptr_t)(${args[2]}), ${args[3]}, ${args[4]})`;
+    case "blaze_rt_dict_get_seq_refkey":
+      return `((void*)blaze_rt_dict_get_seq_refkey(blaze_value_from_dynamic(${args[0]}), ${args[1]}))`;
     case "blaze_rt_dict_set_ref":
       return `blaze_rt_dict_set_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_get_text":

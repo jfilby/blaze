@@ -1827,6 +1827,14 @@ proc blaze_rt_dict_get_seq_numkey*(dictValue: BlazeValue, key: float64): pointer
   let dict = blazeDynamicFromValue(dictValue)
   blaze_rt_dict_get_seq(blazeValueFromDynamic(dict), blazeNumKey(key))
 
+proc blaze_rt_dict_set_seq_refkey*(dictValue: BlazeValue, key: float64, value: pointer, count, size: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set_seq(blazeValueFromDynamic(dict), $uint64(key), value, count, size)
+
+proc blaze_rt_dict_get_seq_refkey*(dictValue: BlazeValue, key: float64): pointer {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get_seq(blazeValueFromDynamic(dict), $uint64(key))
+
 proc blaze_rt_dict_set_numkey_text*(dictValue: BlazeValue, key: float64, value: cstring): float64 {.exportc, cdecl.} =
   let dict = blazeDynamicFromValue(dictValue)
   blaze_rt_dict_set_text(blazeValueFromDynamic(dict), blazeNumKey(key), value)

@@ -12172,6 +12172,27 @@ class TypeScriptParser {
     }
     const name = textValue(key);
     const shape = this.shapeOf(object);
+    // A list holds exactly the indexes it wrote, so `index in list` is the
+    // bounds question. The key is read once by either comparison, which a key
+    // computed at the use cannot be.
+    const sequence = this.valueTypeOf(object);
+    if (sequence.kind === "slice" || sequence.kind === "array" || (shape !== null && shape.kind === "list")) {
+      let index = key;
+      if (!this.repeatable(key)) {
+        const held = `__member${this.fieldCount++}`;
+        this.pendingBefore.push({ kind: "declare", name: held, type: NUMBER_RESULT, init: key, line: Number(fieldOf(this.peek(), "line")) });
+        this.valueTypes.set(held, NUMBER_RESULT);
+        index = { k: "ident", name: held };
+      }
+      const asked: Expression = {
+        k: "binary",
+        op: "&&",
+        left: { k: "binary", op: ">=", left: index, right: { k: "literal", text: "0" } },
+        right: { k: "binary", op: "<", left: index, right: { k: "lengthOf", of: object } },
+      };
+      this.expressionTypes.set(asked, BOOLEAN_RESULT);
+      return asked;
+    }
     if (name !== null) {
       if (shape !== null && shape.kind === "record" && (fieldOf(shape, "fields") as Map<string, ResolvedField>).has(name)) {
         // A record built from an interface has every field it declares, so the
@@ -12355,7 +12376,13 @@ class TypeScriptParser {
         dotted = true;
       }
       const local = (fieldOf(this.classTable, "names") as Set<string>).has(name.text);
-      const known = local || name.text === "Error" || name.text === "Date" || dotted;
+      // A map and a set are one dictionary handle, and a date is the number it
+      // holds, so none of them has a runtime kind a question could ask. What the
+      // source says the value is settles the answer where it says anything; an
+      // untyped value is one of them when it is there at all, which is the same
+      // answer the other built-in classes give.
+      const known = local || name.text === "Error" || name.text === "Date" ||
+        name.text === "Map" || name.text === "Set" || name.text === "WeakMap" || name.text === "WeakSet" || dotted;
       if (!known) {
         this.report("instanceof names a class of this module", `near "${name.text}"`, name);
         continue;
@@ -20205,11 +20232,12 @@ class TypeScriptParser {
       const kind = this.storedKind(collection.value);
       // A list is a block and a length, and an entry is one double: the block
       // is copied when it is written, and the copy's header carries its length,
-      // so the pointer alone is the list a key answers. Only a text key is
-      // answered so far: the dictionary's numbered and reference keys are
-      // written for one value, not for a block.
+      // so the pointer alone is the list a key answers. The dictionary answers
+      // a block for a text, number or reference key; its other key kinds carry
+      // one value and cannot name a block.
+      const keyKind = this.keyKind(collection.key);
       const sequence = kind === "sequence" &&
-        (this.keyKind(collection.key) === "text" || this.keyKind(collection.key) === "number");
+        (keyKind === "text" || keyKind === "number" || keyKind === "reference");
       if (kind === "other" || (kind === "sequence" && !sequence)) {
         this.report(
           `a map here holds a ${typeToString(collection.value)}, which a key cannot answer`,
@@ -21738,7 +21766,7 @@ class TypeScriptParser {
       const type = declared !== undefined
         ? declared.type
         : (this.shapeOf(field.value) ?? this.shapeOfTypeExpr(this.valueTypeOf(field.value)));
-      if (type === null || type.kind === "any" || this.absenceExpression(type) === null) return false;
+      if (type === null || this.absenceExpression(type) === null) return false;
       typed.push({ field, type });
     }
     for (const { field, type } of typed) {

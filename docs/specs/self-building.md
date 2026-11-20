@@ -47,8 +47,8 @@ or one language capability that the rung below it does not need.
 
 ## Where the source stands
 
-The measured tree is 107 compiler sources. The frontend reads 104 of them whole
-and refuses 6 constructs in the remaining 3, so `test/self-host.test.ts` does
+The measured tree is 107 compiler sources. The frontend reads 106 of them whole
+and refuses 2 constructs in the remaining 1, so `test/self-host.test.ts` does
 not pass yet; those refusals are the current queue for rung 4 (see "The current
 refusals" and "Where the self-build stands"). The sources are already written
 as **erasable TypeScript**: `erasableSyntaxOnly` is on in
@@ -154,12 +154,8 @@ the compiler writes and the frontend does not yet read, so each is a reason to
 teach the language or the value model, never to rewrite the source. The counts
 come from `test/self-host-gap.ts`.
 
-- An `instanceof` that names a class of the module, and `in` over a value whose
-  fields the type does not write down (`core/structural-hash.ts`, 3).
 - `function*` and `yield*` (`core/json-store.ts`, 2): a generator is not yet
   part of a program.
-- A map whose values are `slice<text>` indexed by a key
-  (`semantics/ir-validate.ts`, 1).
 
 The earlier blockers on this queue have landed: `BigInt(text)`, the wraps and
 signed comparisons in the contract evaluator, `Number(bigint)`,
@@ -172,8 +168,7 @@ under "Where the self-build stands" and have small regressions in
 
 In the order they block rung 4:
 
-1. **The current refusals.** The 6 constructs listed above, in the structural
-   hash, the JSON store and the IR validator. They stop the compiler from
+1. **The current refusals.** The 2 constructs listed above, in the JSON store. They stop the compiler from
    reading all the functions in its own module graph, so nothing past them can
    be measured by a self-build.
 2. **An object the file returns whole.** A compiled function cannot read a
@@ -284,8 +279,8 @@ binary is made of.
 
 ## Where the self-build stands
 
-The gap report currently reads 104 of 107 compiler sources whole and refuses 6
-constructs in the other 3, so `test/self-host.test.ts` fails; the tests and
+The gap report currently reads 106 of 107 compiler sources whole and refuses 2
+constructs in the other 1, so `test/self-host.test.ts` fails; the tests and
 benchmarks are outside the binary. The contract and IR phases read the functions
 that used to stop a self-build — `verifyCandidate` and the wasm backend's `Body`
 methods among them — and the fixes have small regressions in
@@ -343,11 +338,19 @@ methods among them — and the fixes have small regressions in
   holds, so `Array.from` over a text field resolves where the compiler writes
   it;
 - a conditional object spread writes a field the expected type does not state,
-  taking that field's zero from the value the written arm gives it.
+  taking that field's zero from the value the written arm gives it, including
+  one whose value the read cannot type;
+- `in` over a list is the bounds question, so the structural hash's sparse-array
+  walk reads;
+- the dictionary answers a block of elements under a reference key, so a weak
+  map that holds a list of names builds;
+- `instanceof` a built-in collection is answered as the other built-in classes
+  are: the declared type settles it, and an untyped value is one when it is
+  there at all.
 
 The object layout pass and the C driver build: both read their statements,
 shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The whole-tree gate is the 6 refusals above; fixed point is not reached yet.
+The whole-tree gate is the 2 refusals above; fixed point is not reached yet.

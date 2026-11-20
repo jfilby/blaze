@@ -94,3 +94,55 @@ test("a conditional spread writes a field the expected type does not state", () 
   const { fn, contract } = resolved(source, "make");
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });
+
+test("a conditional spread writes an unknown-typed field a declaration leaves out", () => {
+  // The IR resolver writes a descriptor's `promise` field only when the held
+  // value has one. The field's value is read through a `fieldOf` helper typed
+  // `any`; its absence is the language's null, which is what `undefined` lowers
+  // to, so the field can be written in both arms of the spread.
+  const source = [
+    "function fieldOf(value: unknown, key: string): any {",
+    "  return (value as Record<string, unknown>)[key];",
+    "}",
+    "function descriptor(held: unknown): unknown {",
+    "  return { kind: \"object\", ...(fieldOf(held, \"promise\") === undefined ? {} : { promise: fieldOf(held, \"promise\") }) };",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "descriptor");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), []);
+});
+
+test("instanceof a built-in collection reads for a value the type does not name", () => {
+  // A map and a set are one dictionary handle and a date is a number, so none
+  // of them has a runtime kind to ask. The answer is the one the other built-in
+  // classes give an untyped value: whether the value is there at all.
+  const source = [
+    "function tag(value: object): string {",
+    "  return value instanceof Map ? `map` : value instanceof Set ? `set` : `object`;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "tag");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), []);
+});
+
+test("in asks whether an index is one a list holds", () => {
+  // The structural hash walks a sparse list with `index in array`. A list holds
+  // the indexes it wrote, so the question is the bounds question, and the index
+  // is read once for the two comparisons.
+  const source = [
+    "function present(list: number[], index: number): boolean {",
+    "  return index in list;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "present");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), []);
+});

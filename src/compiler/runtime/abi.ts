@@ -1283,6 +1283,22 @@ entry(
     "Returns the block, or NULL when the key is absent. The block's length is the size the runtime laid out.",
     { tags: ["object"] },
   ),
+  entry(
+    "blaze_rt_dict_set_seq_refkey",
+    "double",
+    [["dict", "BlazeValue"], ["key", "double"], ["value", "void*"], ["count", "double"], ["size", "double"]],
+    "Copies a block of elements into a managed block and writes it into a dictionary under a reference key.",
+    "The copy is a block the runtime lays out, so its length travels with it. Returns the dictionary.",
+    { tags: ["object"] },
+  ),
+  entry(
+    "blaze_rt_dict_get_seq_refkey",
+    "void*",
+    [["dict", "BlazeValue"], ["key", "double"]],
+    "Reads one block of elements of a dictionary by a reference key.",
+    "Returns the block, or NULL when the key is absent. The block's length is the size the runtime laid out.",
+    { tags: ["object"] },
+  ),
   entry("blaze_rt_dict_get_text", "const char*", [["dict", "BlazeValue"], ["key", "const char*"]], "Reads one text of a dictionary by its string key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_set_text", "double", [["dict", "BlazeValue"], ["key", "const char*"], ["value", "const char*"]], "Writes one text of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_has", "double", [["dict", "BlazeValue"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
@@ -5865,6 +5881,18 @@ void* blaze_rt_dict_get_seq_numkey(BlazeValue dictValue, double key) {
   const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
   return blaze_rt_dict_get_seq(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+}
+
+double blaze_rt_dict_set_seq_refkey(BlazeValue dictValue, double key, void* value, double count, double size) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  char buffer[32];
+  return blaze_rt_dict_set_seq(blaze_value_from_dynamic(dict), blaze_rt_dict_refkey(key, buffer, sizeof buffer), value, count, size);
+}
+
+void* blaze_rt_dict_get_seq_refkey(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  char buffer[32];
+  return blaze_rt_dict_get_seq(blaze_value_from_dynamic(dict), blaze_rt_dict_refkey(key, buffer, sizeof buffer));
 }
 
 double blaze_rt_dict_delete_numkey(BlazeValue dictValue, double key) {

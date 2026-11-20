@@ -2124,6 +2124,28 @@ test("a map of lists holds each list whole, with its length", async () => {
   }
 });
 
+test("a map with reference keys holds each list whole", async () => {
+  // A weak map in the compiler's own sources is keyed by an object and holds a
+  // list of names. The reference key is the address the handle carries, and the
+  // list is a block the runtime copied, so the dictionary needs a get and a
+  // set for a block under a reference key.
+  const source = [
+    "export function demo(): number {",
+    "  const key = { name: `a` };",
+    "  const lists = new Map<object, number[]>();",
+    "  lists.set(key, [1, 2]);",
+    "  const held = lists.get(key);",
+    "  return held === undefined ? -1 : held.length;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2", `the ${backend} backend holds a list under a reference key`);
+  }
+});
+
 test("Object.is compares two numbers by the bits they are held as", async () => {
   // `Object.is` is the same-value question: a NaN is the same as itself, and
   // `-0` is not `0`, which `===` answers the other way round for both. A text

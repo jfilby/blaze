@@ -165,6 +165,8 @@ const DICTIONARY_SERVICES: ReadonlyMap<string, DictionaryAnswer> = new Map<strin
   ["blaze_rt_dict_get_seq", "pointer"],
   ["blaze_rt_dict_set_seq_numkey", "number"],
   ["blaze_rt_dict_get_seq_numkey", "pointer"],
+  ["blaze_rt_dict_set_seq_refkey", "number"],
+  ["blaze_rt_dict_get_seq_refkey", "pointer"],
   ["blaze_rt_dict_key_at", "text"],
   ["blaze_rt_dict_value_at", "number"],
   ["blaze_rt_dict_value_at_ref", "dynamic"],
