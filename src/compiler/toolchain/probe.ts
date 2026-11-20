@@ -248,23 +248,35 @@ export function planProbe(contract: FunctionContract, parsed: ParsedContract): P
   }
   // A field the layout holds at an untyped reference is a value the probe can
   // only build as zero — a text, a handle or a function the object will carry
-  // at run time. Where the body calls through such a field, a zero is a null
-  // address and the probe faults on a candidate that is sound for the values a
-  // caller actually hands it. There is no input from the contract that answers
-  // the question here, so leave the verdict to the program.
-  const uncallable = parameters.find((param) => {
-    if (param.type.kind !== "ref") return false;
-    const object = objects[String(fieldOf(param.type, "name"))];
-    if (object === undefined) return false;
-    return (fieldOf(object, "fields") as readonly { readonly type: string }[]).some((field) => {
-      const type = parseType(String(fieldOf(field, "type")));
-      return type.kind === "ref" && fieldOf(type, "of") === null && fieldOf(type, "name") === undefined;
-    });
-  });
-  if (uncallable !== undefined) {
+  // at run time. Where the body calls through such a field of a parameter, a
+  // zero is a null address and the probe faults on a candidate that is sound
+  // for the values a caller actually hands it. A body that only reads the
+  // field is fine, so look into the contract's own IR before skipping.
+  const refParams = new Set(parameters.filter((param) => param.type.kind === "ref").map((param) => param.name));
+  const callsAFieldOfParam = (node: unknown): boolean => {
+    if (Array.isArray(node)) return node.some(callsAFieldOfParam);
+    if (node === null || typeof node !== "object") return false;
+    const value = node as Record<string, unknown>;
+    if (String(value["k"]) === "invoke" || String(value["k"]) === "call") {
+      const callee = value["callee"] as Record<string, unknown> | undefined;
+      if (callee !== undefined && String(callee["k"]) === "member") {
+        const base = callee["base"] as Record<string, unknown> | undefined;
+        if (base !== undefined && String(base["k"]) === "ident" && refParams.has(String(base["name"]))) return true;
+      }
+      // The resolved IR names a call through a value by the field it reads.
+      const through = value["through"] as Record<string, unknown> | undefined;
+      if (through !== undefined && String(through["k"]) === "loadField") {
+        const base = through["object"] as Record<string, unknown> | undefined;
+        if (base !== undefined && String(base["k"]) === "local" && refParams.has(String(base["name"]))) return true;
+      }
+    }
+    return Object.values(value).some(callsAFieldOfParam);
+  };
+  const body = fieldOf(fieldOf(contract, "definition"), "statements");
+  if (Array.isArray(body) && callsAFieldOfParam(body)) {
     return {
       kind: "skip",
-      reason: `the parameter "${uncallable.name}" holds a field at an untyped reference, which the contract gives no value to call through`,
+      reason: "the body calls through a field of a reference the contract hands it, which has no value the probe can supply",
     };
   }
 
