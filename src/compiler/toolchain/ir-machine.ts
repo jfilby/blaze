@@ -8052,6 +8052,14 @@ class Machine {
           }
         }
         this.value(object);
+        // A value the read holds as an untyped reference is a registry handle,
+        // not the address the field lives at. Resolve it before reading the
+        // field, or the offset lands on a small integer and faults.
+        if (isDynamicType(fieldOf(object, "type") as SemanticType)) {
+          this.code.movdXmm(XMM0, RAX);
+          this.external("blaze_pointer_of_handle");
+          this.callForeign("blaze_pointer_of_handle");
+        }
         this.readAt(fieldOf(value, "type") as SemanticType, offset);
         return;
       }
@@ -11464,6 +11472,9 @@ class Machine {
       const held = this.hold(TEXT, "blaze_state_key");
       this.store(held);
       this.callSymbol("blaze_rt_state_get_handle", [held], NUMBER);
+      // The handle comes back as the double the ABI carries it in, while the
+      // read is a reference the rest of the body takes from the accumulator.
+      this.dynamicResult();
       return;
     }
     if (callee === "blaze_rt_state_set") {
@@ -11472,7 +11483,11 @@ class Machine {
       this.at(args[0], TEXT);
       const key = this.hold(TEXT, "blaze_state_key");
       this.store(key);
-      this.at(args[1], fieldOf(args[1], "type") as SemanticType);
+      const valueType = fieldOf(args[1], "type") as SemanticType;
+      this.at(args[1], valueType);
+      // A reference arrives in the general register while the double the cell
+      // service takes is read from the float one.
+      if (isReference(valueType)) this.code.movdXmm(XMM0, RAX);
       const value = this.hold(NUMBER, "blaze_state_value");
       this.store(value);
       this.callSymbol("blaze_rt_state_set_handle", [key, value], NUMBER);

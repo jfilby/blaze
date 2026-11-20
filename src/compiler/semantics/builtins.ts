@@ -188,6 +188,8 @@ function builtinTable(): Map<string, BuiltinSignature> {
 
   table.set("blaze_rt_object_has_field_from_handle", { params: [F64, TEXT], returns: F64, arity: 2 });
 
+  table.set("blaze_pointer_of_handle", { params: [F64], returns: ANY, arity: 1 });
+
   table.set("blaze_rt_dict_len", { params: [F64], returns: F64, arity: 1 });
 
   table.set("blaze_rt_dict_key_at", { params: [F64, F64], returns: TEXT, arity: 2 });

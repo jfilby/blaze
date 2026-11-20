@@ -14971,9 +14971,24 @@ class TypeScriptParser {
         // reads after it are the whole number's. A double or a truth assertion
         // is not one: a `Record` reads as a value of the fields' own types.
         const whole = type.kind === "primitive" && type.name !== "f64" && type.name !== "f32" && type.name !== "bool";
+        const assertedFrom = this.valueTypeOf(current());
         if (whole || type.kind === "slice" || type.kind === "array" || type.kind === "ref") {
           this.expressionTypes.set(current(), type);
           if (!constAssertion) this.assertedValues.add(current());
+        }
+        // A value the read holds as an untyped reference is a registry handle,
+        // while a field read of a named layout takes the address the handle
+        // names. An assertion that gives the value a named reference type has
+        // to cross that boundary where it is written, or a field of the cast
+        // reads from the handle's bits as an address and faults.
+        const namedHeld = current().k === "ident"
+          ? this.valueTypes.get((current() as { name: string }).name)
+          : undefined;
+        const alreadyPointer = namedHeld !== undefined && namedHeld.kind === "ref" && namedHeld.name !== undefined;
+        if (type.kind === "ref" && type.name !== undefined && unknownReference(assertedFrom) && !alreadyPointer) {
+          const resolved: Expression = { k: "call", name: "blaze_pointer_of_handle", args: [current()] };
+          this.expressionTypes.set(resolved, type);
+          replace(resolved);
         }
         continue;
       }

@@ -298,6 +298,7 @@ function hostCall(name: string, args: string[]): string | null {
 function builtinExpression(name: string, args: string[]): string {
   const host = hostCall(name, args);
   if (host !== null) return host;
+  if (name === "blaze_pointer_of_handle") return `(double)(uintptr_t)(blaze_pointer_of_handle(${args[0]}))`;
   switch (name) {
     case "require":
       // The module a program requires is a namespace the compiler reads the
