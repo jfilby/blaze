@@ -240,6 +240,20 @@ test("a rest function type is called at the arity the source wrote", () => {
   arityOf(handle?.body ?? []);
 });
 
+test("a cast of a call result does not cross a reference to a pointer", () => {
+  const source = [
+    "interface T { name: string }",
+    "function get(o: unknown): unknown { return o; }",
+    "export function f(o: unknown): T { return get(o) as T; }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "f");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  assert.doesNotMatch(JSON.stringify(handle?.body ?? []), /blaze_pointer_of_handle/, "the call result keeps its reference");
+});
+
 test("a reference written into a number slot crosses as its handle", () => {
   // `Record<string, unknown>` is a dictionary handle in the contract, while a
   // named record is a reference. Writing one into the other asks the runtime

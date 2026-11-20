@@ -15164,7 +15164,7 @@ class TypeScriptParser {
         // A value that already names a reference is the address the layout
         // expects: crossing it to a pointer would hand the callee a handle
         // where it reads a pointer.
-        const namedSource = (assertedFrom.kind === "ref" && assertedFrom.name !== undefined && !unknownReference(assertedFrom)) || ["index", "object", "member"].includes(current().k);
+        const namedSource = (assertedFrom.kind === "ref" && assertedFrom.name !== undefined && !unknownReference(assertedFrom)) || ["index", "object", "member", "call"].includes(current().k);
         // A named record viewed as `Record<string, V>` is a dictionary handle:
         // the pointer is the number the runtime's keyed reads take.
         if (shape !== null && shape.kind === "record" && shape.index !== null &&
