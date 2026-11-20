@@ -239,6 +239,25 @@ test("a rest function type is called at the arity the source wrote", () => {
   arityOf(handle?.body ?? []);
 });
 
+test("a field read on an empty fallback goes by name", () => {
+  // `fieldOf(x, "left") ?? {}` narrows to an empty object in one arm, and the
+  // body reads `k` on the choice. The descriptor answers absence for that arm
+  // instead of laying a field the literal never wrote.
+  const source = [
+    "export function tag(x: unknown): string {",
+    "  const left = x as { left?: { k: string } };",
+    "  const chosen = left.left ?? {};",
+    '  return String(chosen.k);',
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "tag");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  assert.doesNotMatch(JSON.stringify(handle?.body ?? []), /__refused_/, "the read has no refused hole");
+});
+
 test("a recursive arrow passed to some reads through an array test", () => {
   // `Array.isArray` narrows an untyped value to a list in the branch it holds,
   // so `some` is the collection method and the self-reference is its callback.

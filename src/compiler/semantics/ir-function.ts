@@ -1703,7 +1703,16 @@ class FunctionBody {
     const base = this.typed(fieldOfValue(expression, "base") as Expression, null, line);
     const object = fieldOfValue(base, "value") as SemanticValue;
     if ((fieldOfValue(base, "inferred") as Inferred).kind === "object") {
-      const layout = this.layoutFor(String(fieldOfValue(fieldOfValue(base, "inferred") as Inferred, "key")), line);
+      const key = String(fieldOfValue(fieldOfValue(base, "inferred") as Inferred, "key"));
+      const layout = this.layoutFor(key, line);
+      const written = this.objects[layout] === undefined ? undefined : fieldOfValue(this.objects[layout], "fields") as readonly { name: string }[] | undefined;
+      // A `?? {}` fallback can be read at a field the empty arm did not write.
+      // The record carries its descriptor, so the field is asked by name: an
+      // absent one answers the null the source's absent value is.
+      if (written !== undefined && !written.some((one) => one.name === String(fieldOfValue(expression, "field")))) {
+        const name: SemanticValue = { k: "text", type: TEXT, parts: [{ k: "text", value: String(fieldOfValue(expression, "field")) }] };
+        return this.runtimeCall("blaze_rt_object_get_from_handle", [object, name], ANY_REF);
+      }
       return {
         value: { k: "loadField", type: this.fieldType(layout, String(fieldOfValue(expression, "field")), line), object, layout, field: String(fieldOfValue(expression, "field")) },
         inferred: this.fieldOfValue(String(fieldOfValue(fieldOfValue(base, "inferred") as Inferred, "key")), String(fieldOfValue(expression, "field"))),
@@ -1735,7 +1744,13 @@ class FunctionBody {
     // not have.
     if (layouts.length === 0) return { value: object, inferred: ANY };
     const layout = layouts[0] as string;
-    const type = this.fieldType(layout, String(fieldOfValue(expression, "field")), line);
+    const asks = String(fieldOfValue(expression, "field"));
+    const present = (this.objects[layout] === undefined ? [] : fieldOfValue(this.objects[layout], "fields") as readonly { name: string }[]) ?? [];
+    if (!present.some((one) => one.name === asks)) {
+      const name: SemanticValue = { k: "text", type: TEXT, parts: [{ k: "text", value: asks }] };
+      return this.runtimeCall("blaze_rt_object_get_from_handle", [object, name], ANY_REF);
+    }
+    const type = this.fieldType(layout, asks, line);
     // The read is at the type the layout gives the field, which is the number
     // behind it rather than the reference: `p.x + p.y` over an `any` is a sum
     // of two doubles because the layouts the program lays out say the fields

@@ -15161,7 +15161,11 @@ class TypeScriptParser {
           ? this.valueTypes.get((current() as { name: string }).name)
           : undefined;
         const alreadyPointer = namedHeld !== undefined && namedHeld.kind === "ref" && namedHeld.name !== undefined;
-        if (type.kind === "ref" && type.name !== undefined && unknownReference(assertedFrom) && !alreadyPointer) {
+        // A value that already names a reference is the address the layout
+        // expects: crossing it to a pointer would hand the callee a handle
+        // where it reads a pointer.
+        const namedSource = assertedFrom.kind === "ref" && assertedFrom.name !== undefined && !unknownReference(assertedFrom);
+        if (type.kind === "ref" && type.name !== undefined && unknownReference(assertedFrom) && !alreadyPointer && !namedSource) {
           const resolved: Expression = { k: "call", name: "blaze_pointer_of_handle", args: [current()] };
           this.expressionTypes.set(resolved, type);
           // The assertion named the layout the value holds: carry its shape
