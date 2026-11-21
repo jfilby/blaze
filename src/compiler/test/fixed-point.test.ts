@@ -58,7 +58,7 @@ test("the native compiler reaches a fixed point over the compiler tree", { skip:
 
   const two = [stage2];
   build(two);
-  delivered();
+  const stage3 = delivered();
 
   // The IR a stage answers for the same function is the fixed point: a
   // difference means a stage changed what it resolves from the same source.
@@ -66,7 +66,12 @@ test("the native compiler reaches a fixed point over the compiler tree", { skip:
   for (const fn of functions) {
     const fromOne = ir(one, fn);
     const fromTwo = ir(two, fn);
+    const fromThree = ir([stage3], fn);
     assert.equal(fromTwo, fromOne, `${fn} changed between stage 1 and stage 2`);
-    assert.equal(ir(two, fn), fromTwo, `${fn} changed between stage 2 and stage 3`);
+    assert.equal(fromThree, fromTwo, `${fn} changed between stage 2 and stage 3`);
   }
+
+  // The build record's selected candidate is what a stage delivers, and a
+  // difference there is a different answer to the same build.
+  void stage3;
 });
