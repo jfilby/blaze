@@ -312,6 +312,19 @@ test("a wide result answers a function declared to return a number", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the wide result converts");
 });
 
+test("a folded Array.isArray test is a boolean a negation accepts", () => {
+  const source = [
+    "function fieldOf(v: unknown, k: string): any { return v; }",
+    "export function demo(candidate: unknown): void {",
+    "  const candidates = fieldOf(candidate, 'candidates') as unknown[];",
+    "  if (!Array.isArray(candidates)) return;",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the folded truth negates");
+});
+
 test("fieldOf's field shape decides a chained method on an unshaped read", () => {
   const source = [
     "function fieldOf(v: unknown, k: string): any { return v; }",

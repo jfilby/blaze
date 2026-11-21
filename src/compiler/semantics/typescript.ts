@@ -12183,7 +12183,7 @@ class TypeScriptParser {
   private isArrayTest(value: Expression): Expression {
     const type = this.valueTypeOf(value);
     const answer = (isOne: boolean): Expression => {
-      const literal: Expression = { k: "literal", text: isOne ? "1" : "0" };
+      const literal: Expression = { k: "literal", text: isOne ? "1" : "0", boolean: true };
       this.expressionTypes.set(literal, BOOLEAN_RESULT);
       return literal;
     };
