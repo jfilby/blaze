@@ -748,6 +748,10 @@ function compoundProblems(target: SemanticType, value: SemanticValue, operator: 
     return [`${prefix}"${name}" is a ${typeText(target)}, which ${operator} cannot write`];
   }
   if (!typeEquals(common, target)) {
+    // A wider value written into a narrow whole slot keeps its low limb, the
+    // same narrowing a direct assignment makes; a fraction drops as it does
+    // wherever a double is read as a whole number.
+    if (isNumber(target) && !isWideType(target) && isNumber(common)) return [];
     return [`${prefix}${operator} writes a ${typeText(common)} into "${name}", a ${typeText(target)}`];
   }
   return [];
