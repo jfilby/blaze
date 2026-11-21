@@ -1047,7 +1047,13 @@ class FunctionBody {
         const sourceSlot = fieldOfValue(source, "slot") as SemanticSlot;
         const sourceName = String(fieldOfValue(source, "name"));
         const element = elementOf(sourceInferred);
-        const length: SemanticValue = { k: "length", type: USIZE, of: { k: "local", type: slotType(sourceSlot), name: sourceName } };
+        const sourceType = slotType(sourceSlot);
+        const sourceLocal: SemanticValue = { k: "local", type: sourceType, name: sourceName };
+        // A value the read could not type is walked at run time: the runtime
+        // answers its length and its elements through its dynamic array.
+        const length: SemanticValue = !this.isBufferValue(sourceType) && sourceType.kind !== "text"
+          ? fieldOfValue(this.runtimeCall("blaze_rt_array_length", [sourceLocal], F64), "value") as SemanticValue
+          : { k: "length", type: USIZE, of: sourceLocal };
         const index = this.generated("i");
         this.open();
         this.bind(String(fieldOfValue(statement, "variable")), {
