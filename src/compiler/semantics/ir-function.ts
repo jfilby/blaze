@@ -1967,10 +1967,25 @@ class FunctionBody {
       const base = this.typed(callArgs[0] as Expression, null, line);
       const key = this.typed(callArgs[1] as Expression, null, line);
       const keyValue = fieldOfValue(key, "value") as SemanticValue;
-      const field = keyValue.k === "const" ? String(fieldOfValue(keyValue, "text")) : null;
+      const field = keyValue.k === "const" ? String(fieldOfValue(keyValue, "text"))
+        : keyValue.k === "text"
+          ? (fieldOfValue(keyValue, "parts") as readonly { k: string; value?: string }[]).map((part) => part.k === "text" ? String(part.value ?? "") : "").join("")
+          : null;
       const inferred = fieldOfValue(base, "inferred") as Inferred;
-      const named = inferred.kind === "type" && inferred.type.kind === "ref" ? inferred.type.name : null;
-      const layout = named === undefined || named === null || this.objects[named] === undefined ? null : this.objects[named];
+      let named = inferred.kind === "type" && inferred.type.kind === "ref" ? inferred.type.name : null;
+      // An interface the contract erases to `ref<any>` loses the layout name.
+      // Find the layout that declares the field the source read by key: the
+      // record the value holds is the one with that field at a known type.
+      if (field !== null && (named === undefined || named === null)) {
+        for (const [name, layout] of Object.entries(this.objects)) {
+          const found = (fieldOfValue(layout, "fields") as readonly { name: string; type: string }[]).find((one) => one.name === field);
+          if (found !== undefined) {
+            named = name;
+            break;
+          }
+        }
+      }
+      const layout = named === undefined || named === null ? null : this.objects[named];
       const declared = field !== null && layout !== null
         ? (fieldOfValue(layout, "fields") as readonly { name: string; type: string }[]).find((one) => one.name === field)
         : undefined;

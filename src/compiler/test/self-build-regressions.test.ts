@@ -289,18 +289,15 @@ test("fieldOf on a named record reads the field at its type", () => {
   const source = [
     "function fieldOf(value: unknown, key: string): any { return value; }",
     "interface Size { value: number; next: number }",
-    "export function demo(size: Size): number {",
+    "function read(): Size { return { value: 2, next: 3 }; }",
+    "export function demo(): number {",
+    "  const size = read();",
     "  return (fieldOf(size, `next`) as number) + (fieldOf(size, `value`) as number);",
     "}",
-    "",
+    "main();",
   ].join("\n");
-  const read = readTypeScriptModule(source, "module.ts", false);
-  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
-  const read2 = readTypeScriptModule(source, "module.ts", false);
-  const fn2 = read2.analysis.functions.find((one) => one.name === "demo");
-  const handle = fn2?.handle as { body?: unknown } | undefined;
-  const body = JSON.stringify(handle?.body ?? []);
-  assert.match(body, /"k":"call","name":"fieldOf"/, "the fields are read by key");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the two fields add as numbers");
 });
 
 test("a wide result answers a function declared to return a number", () => {
