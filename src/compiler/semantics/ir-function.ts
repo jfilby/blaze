@@ -1608,13 +1608,20 @@ class FunctionBody {
         const type = absent(otherwise) && !absent(then) ? thenType
           : absent(then) && !absent(otherwise) ? otherwiseType
             : this.common(thenType, otherwiseType, line);
+        // An absent arm is the zero of the type the other arm answers: it is
+        // carried at that type, not at the unshaped reference it started as,
+        // so the validator reads both arms as values of one type.
+        const thenValue = fieldOfValue(then, "value") as SemanticValue;
+        const otherwiseValue = fieldOfValue(otherwise, "value") as SemanticValue;
+        if (absent(otherwise) && !absent(then)) otherwiseValue.type = type;
+        if (absent(then) && !absent(otherwise)) thenValue.type = type;
         return {
           value: {
             k: "select",
             type,
             condition,
-            then: fieldOfValue(then, "value") as SemanticValue,
-            otherwise: fieldOfValue(otherwise, "value") as SemanticValue,
+            then: thenValue,
+            otherwise: otherwiseValue,
           },
           // Both arms are walked so both objects are laid out, but a choice is
           // whichever arm it takes: two arms that name the same thing, or a

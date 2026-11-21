@@ -312,6 +312,18 @@ test("a wide result answers a function declared to return a number", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the wide result converts");
 });
 
+test("an absent conditional arm takes the type the other arm answers", () => {
+  const source = [
+    "export function demo(flag: boolean): string[] {",
+    "  const held: string[] | undefined = flag ? [`a`] : undefined;",
+    "  return held ?? [`b`];",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "both arms read at the list type");
+});
+
 test("a folded typeof comparison is a boolean a logical accepts", () => {
   const source = [
     "export function demo(text: string, flag: boolean): boolean {",
