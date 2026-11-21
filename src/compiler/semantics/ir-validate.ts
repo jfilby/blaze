@@ -743,8 +743,12 @@ function compoundProblems(target: SemanticType, value: SemanticValue, operator: 
     }
     return [];
   }
+  // A boxed name the read could not type is the number the runtime holds in it:
+  // a counter captured by a closure still steps by a number.
+  const dynamicBox = target.kind === "ref" && target.of === null && target.name === undefined;
   const common = commonNumber(target, value.type);
   if (common === null) {
+    if (dynamicBox && isNumber(value.type)) return [];
     return [`${prefix}"${name}" is a ${typeText(target)}, which ${operator} cannot write`];
   }
   if (!typeEquals(common, target)) {
