@@ -372,6 +372,9 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   // parameter reads: a value of a union that includes text reaches such a
   // parameter as the same bits either way.
   if (isTextType(from) && isNumber(to)) return true;
+  // A block of bytes is the text those bytes spell, the inverse of the text
+  // encoder: a file written from a buffer hands the runtime its managed text.
+  if (isSequence(from) && isTextType(to) && elementTypeOf(from) !== null && isNumber(elementTypeOf(from) as SemanticType)) return true;
   // A record reference is carried as the address it names, which is the
   // number a dictionary handle holds: an empty-object fallback to a
   // dictionary is that address, not a different value.

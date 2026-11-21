@@ -312,6 +312,19 @@ test("a wide result answers a function declared to return a number", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the wide result converts");
 });
 
+test("a block of bytes passes where a text is expected", () => {
+  const source = [
+    "function write(_path: string, _text: string): void { return; }",
+    "export function demo(path: string): void {",
+    "  const bytes: number[] = [72, 105];",
+    "  write(path, bytes as unknown as string);",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the byte block converts to text");
+});
+
 test("a wide number shifts by a machine-word count", () => {
   const source = [
     "export function demo(n: bigint, shift: bigint): bigint {",
