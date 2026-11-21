@@ -12169,7 +12169,7 @@ class TypeScriptParser {
     else if (numberLeft !== null && numberRight !== null) equal = numberLeft === numberRight;
     if (equal === null) return null;
     const answer = op === "===" || op === "==" ? equal : !equal;
-    return { k: "literal", text: answer ? "1" : "0" };
+    return { k: "literal", text: answer ? "1" : "0", boolean: true };
   }
 
   /**
