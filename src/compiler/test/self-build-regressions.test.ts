@@ -240,6 +240,34 @@ test("a rest function type is called at the arity the source wrote", () => {
   arityOf(handle?.body ?? []);
 });
 
+test("a text and a reference pass to a dynamic number parameter", () => {
+  const source = [
+    "function takesNumber(n: number): number { return n; }",
+    "export function demo(text: string, value: unknown): number {",
+    "  return takesNumber(text) + takesNumber(value);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the calls resolve");
+});
+
+test("the length of a dynamic value asks the runtime", () => {
+  const source = [
+    "export function demo(value: unknown): number {",
+    "  if (!Array.isArray(value) || value.length === 0) return 0;",
+    "  return value.length;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the length reads resolve");
+});
+
 test("keys of an empty literal are an empty list", () => {
   const source = [
     "export function demo(): number {",

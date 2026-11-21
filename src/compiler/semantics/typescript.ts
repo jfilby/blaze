@@ -12788,7 +12788,7 @@ class TypeScriptParser {
       const path = this.typeofPaths.get(tag);
       if (path !== undefined) {
         if (positive === truth) {
-          const type = typeOfTypeofName(literal);
+          const type = literal === "bigint" && this.wideBigint ? WIDE_RESULT : typeOfTypeofName(literal);
           if (type !== null) (fieldOf(settled, "types") as Map<string, TypeExpr>).set(path, type);
         }
         return;

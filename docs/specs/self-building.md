@@ -376,11 +376,10 @@ shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear. A self-build now lowers `runBuild`, `runStored`,
-`runSemanticIr` and `machineRefusalOf`, and fails in `projectStateLine` where an
-empty object fallback reaches `Object.keys` as a record rather than a
-dictionary. Carriers now cross at the IR declare where the annotation says
-which one is wanted, rather than in the cast: a reference is not crossed to a
-pointer twice, and a dictionary handle viewed as a record crosses once. What
-remains is that fallback, the later spec slices, and the fixed point test.
-Fixed point is not reached yet.
+The frontend gate is clear. A self-build now passes `projectStateLine` and
+lowers most of the compiler, and fails in `evaluate` where a value the read
+could not type reaches a wide-number parameter. References and texts cross to
+the number a dynamic parameter reads, a name whose type is unknown asks the
+runtime for its length, and an empty object fallback answers `Object.keys`.
+What remains is that wide-number conversion, the later spec slices, and the
+fixed point test. Fixed point is not reached yet.

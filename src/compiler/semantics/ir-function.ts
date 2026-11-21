@@ -1385,7 +1385,15 @@ class FunctionBody {
         return { value: { k: "argv", type: F64, index: this.typed(fieldOfValue(expression, "index") as Expression, WHOLE, line).value }, inferred: asType(F64) };
       case "length": {
         const held = this.read(String(fieldOfValue(expression, "buffer")), line);
-        return { value: { k: "length", type: USIZE, of: { k: "local", type: slotType(fieldOfValue(held, "slot") as SemanticSlot), name: String(fieldOfValue(held, "name")) } }, inferred: asType(USIZE) };
+        const heldType = slotType(fieldOfValue(held, "slot") as SemanticSlot);
+        const heldName = String(fieldOfValue(held, "name"));
+        const local: SemanticValue = { k: "local", type: heldType, name: heldName };
+        // A name the read could not type may still hold a list at run time:
+        // the runtime answers its length the way it answers a dynamic array.
+        if (!this.isBufferValue(heldType) && heldType.kind !== "text") {
+          return this.runtimeCall("blaze_rt_array_length", [local], F64);
+        }
+        return { value: { k: "length", type: USIZE, of: local }, inferred: asType(USIZE) };
       }
       case "lengthOf": {
         const operand = this.typed(fieldOfValue(expression, "of") as Expression, null, line);
@@ -2068,7 +2076,17 @@ class FunctionBody {
         writtenArgs = completed;
       }
       this.arity(called, signatureParams.length, writtenArgs.length, line);
-      const args = writtenArgs.map((argument, at) => this.typed(argument, asType(parseType(String(fieldOfValue(signatureParams[at], "type")))), line));
+      const args = writtenArgs.map((argument, at) => {
+        const paramType = parseType(String(fieldOfValue(signatureParams[at], "type")));
+        const typed = this.typed(argument, asType(paramType), line);
+        let value = fieldOfValue(typed, "value") as SemanticValue;
+        // A record reference is the handle the runtime names for the object:
+        // a service that takes a number reads it through the handle service.
+        if (paramType.kind === "primitive" && paramType.name === "f64" && value.type.kind === "ref") {
+          value = fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [value], F64), "value") as SemanticValue;
+        }
+        return { ...typed, value };
+      });
       const returns = parseType(String(fieldOfValue(signature, "returns")));
       return {
         value: {

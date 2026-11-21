@@ -368,6 +368,14 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
     return isWideType(to);
   }
   if (isTextType(from) && isTextType(to)) return true;
+  // A text is carried as the pointer it names, which is the number a dynamic
+  // parameter reads: a value of a union that includes text reaches such a
+  // parameter as the same bits either way.
+  if (isTextType(from) && isNumber(to)) return true;
+  // A record reference is carried as the address it names, which is the
+  // number a dictionary handle holds: an empty-object fallback to a
+  // dictionary is that address, not a different value.
+  if (isReference(from) && isNumber(to)) return true;
   if (isReference(from) && isReference(to)) return true;
   if (isSequence(from) && isSequence(to)) {
     const left = elementTypeOf(from);
