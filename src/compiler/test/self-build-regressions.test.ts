@@ -734,3 +734,37 @@ test("in asks whether an index is one a list holds", () => {
   const { fn, contract } = resolved(source, "present");
   assert.deepEqual(semanticFunctionProblems(fn, contract), []);
 });
+
+test("a function reference held in a module object's field is callable", () => {
+  const source = [
+    "function f(): number { return 1; }",
+    "const table = { fn: f };",
+    "export function call(): number { return table.fn(); }",
+    "main();",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "call");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the field holds the function");
+});
+
+test("a pair map's index parameter is the position, not the element", () => {
+  const source = [
+    "interface Row { export: string }",
+    "function rows(): Row[] { return [{ export: `a` }]; }",
+    "export function demo(): number {",
+    "  const base = 10;",
+    "  const map = new Map(rows().map((one, index) => [one.export, base + index]));",
+    "  return map.get(`a`) ?? 0;",
+    "}",
+    "main();",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const functions = read.analysis.functions.map((one) => one.name);
+  const collect = functions.find((name) => name.startsWith("__collect_"));
+  assert.ok(collect !== undefined, "a collect helper was written");
+  const helper = read.analysis.functions.find((one) => one.name === collect);
+  const body = JSON.stringify(helper?.handle?.body ?? []);
+  assert.match(body, /"right":\{"k":"ident","name":"at"\}/, "the index is the loop position");
+});

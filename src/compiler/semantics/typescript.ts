@@ -4924,7 +4924,25 @@ class TypeScriptParser {
         // field is the shape of the value written for it.
         const fields = new Map<string, ResolvedField>();
         for (const field of fieldOf(value, "fields") as { name: string; value: Expression }[]) {
-          fields.set(String(fieldOf(field, "name")), { type: this.shapeOf(fieldOf(field, "value") as Expression) ?? { kind: "any" }, optional: false });
+          const written = fieldOf(field, "value") as Expression;
+          let fieldShape = this.shapeOf(written);
+          // A declared function written as a field value (`{ fn: f }`) has no
+          // shape of its own where it is named, but the function it is has a
+          // signature: the field holds that function, so a call through it is
+          // the call of the value the field carries.
+          if ((fieldShape === null || fieldShape.kind === "any") && written.k === "ident") {
+            const name = String(fieldOf(written, "name"));
+            const params = this.declaredParams.get(name);
+            const returns = this.declaredReturns.get(name);
+            if (params !== undefined && returns !== undefined) {
+              fieldShape = {
+                kind: "function",
+                params: params.map((param) => this.shapeOfTypeExpr(param)),
+                returns: this.shapeOfTypeExpr(returns),
+              };
+            }
+          }
+          fields.set(String(fieldOf(field, "name")), { type: fieldShape ?? { kind: "any" }, optional: false });
         }
         shape = { kind: "record", fields, index: null };
         break;
@@ -4984,6 +5002,26 @@ class TypeScriptParser {
           const held = this.shapeOf(awaited);
           if (held !== null) {
             shape = held;
+            break;
+          }
+        }
+        // A module value is read as a call of its getter. Its initializer was
+        // shaped before the file's functions were scanned, so a function held in
+        // a field of the value had no signature then. Shape it now, when the
+        // signatures are known, so a call through that field resolves.
+        if (this.declaredReturnShapes.get(callName)?.kind === "record") {
+          // Find the module value whose getter this call names, and re-shape its
+          // initializer now that the file's function signatures are known.
+          for (const [valueName, getter] of this.valueGetters) {
+            if (getter.name !== callName) continue;
+            const initial = this.stateInitials.get(valueName);
+            if (initial !== undefined) {
+              // The first shaping was cached before the file's signatures were
+              // known; re-shape from the expression now that they are.
+              this.expressionShapes.delete(initial.init);
+              const shaped = this.shapeOf(initial.init);
+              if (shaped !== null) this.declaredReturnShapes.set(callName, shaped);
+            }
             break;
           }
         }
@@ -12974,6 +13012,19 @@ class TypeScriptParser {
       this.position = savedPosition;
       if (init === null) continue;
       if (getter.type.kind === "ref" && getter.type.of === null && getter.type.name === undefined) getter.type = this.valueTypeOf(init);
+      // The getter hands back the value its initializer wrote. Keep that
+      // value's shape as the getter's answer, so a field read through a module
+      // value (`table.fn`) resolves the field the literal wrote and a call of it
+      // (`table.fn()`) is the call of the function held there, not a refusal on
+      // an opaque reference.
+      const writtenShape = this.shapeOf(init);
+      // The getter is read as a call under either the value's name or the
+      // internal getter's; keep the initializer's shape under both so a field
+      // read through it resolves what the literal wrote.
+      if (writtenShape !== null) {
+        this.declaredReturnShapes.set(name, writtenShape);
+        this.declaredReturnShapes.set(getter.name, writtenShape);
+      }
       const held = this.collectionOfExpression(init);
       if (held !== null) this.declaredCollections.set(getter.name, held);
       this.stateInitials.set(name, { init, prelude });
@@ -23511,7 +23562,11 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const writtenNames = bindingParams !== null
       ? bindingParams.map((param: ParameterInfo) => param.name)
       : (fieldOf(lifted, "params") as { name: string; type: TypeExpr }[]).slice(captures.length).map((param: ParameterInfo) => param.name);
-    const params = new Set(writtenNames as string[]);
+    // A callback with two parameters names the element and its position:
+    // `(item, index) => [item.key, index]`. The helper walks the source by
+    // position, so the second parameter is the loop's index, not the element.
+    const indexName = writtenNames.length > 1 ? (writtenNames[1] as string) : null;
+    const params = new Set((writtenNames as string[]).filter((name) => name !== indexName));
     const bindings = destructuredBindingsOf(fieldOf(lifted, "body"));
     const temp = writtenNames[0] ?? "";
     const isEntries = entriesCollection !== null && entriesCollection.kind === "map";
@@ -23535,9 +23590,14 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       const valueRead = (): Expression => ({ k: "call", name: this.valueReadName(coll.value), args: [{ k: "ident", name: "item" }, { k: "ident", name: "at" }] });
       return substituteEntryPair(value, temp, keyRead, valueRead);
     };
+    // A second callback parameter is the position it walks: substitute it with
+    // the loop's index, which the helper names `at`.
+    const withIndex = (value: Expression): Expression => indexName === null ? value : substituteParams(value, new Set([indexName]), () => ({ k: "ident", name: "at" }));
     const first = expandPair(stagedPair.first);
     const second = expandPair(stagedPair.second);
     if (first === null || second === null) return null;
+    const firstWithIndex = withIndex(first);
+    const secondWithIndex = withIndex(second);
     // Types are read where the helper declares `item` and `at`: an expanded
     // value names the element of the loop, which this body has not named.
     const savedItemType = this.valueTypes.get("item");
@@ -23558,9 +23618,9 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
         const heldShape = listShape !== null && listShape.kind === "list" ? listShape.of : null;
         if (heldShape !== null) this.valueShapes.set("item", { kind: "list", of: heldShape });
       }
-      keyType = this.valueTypeOf(first);
-      valueType = this.valueTypeOf(second);
-      secondShape = this.shapeOf(second);
+      keyType = this.valueTypeOf(firstWithIndex);
+      valueType = this.valueTypeOf(secondWithIndex);
+      secondShape = this.shapeOf(secondWithIndex);
     } finally {
       if (savedItemType === undefined) this.valueTypes.delete("item"); else this.valueTypes.set("item", savedItemType);
       if (savedAtType === undefined) this.valueTypes.delete("at"); else this.valueTypes.set("at", savedAtType);
@@ -23601,7 +23661,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
         step: null,
         down: false,
         body: [
-          { kind: "expression", value: { k: "call", name: setName, args: [{ k: "ident", name: "out" }, first, second] }, line },
+          { kind: "expression", value: { k: "call", name: setName, args: [{ k: "ident", name: "out" }, firstWithIndex, secondWithIndex] }, line },
         ],
         line,
       },
