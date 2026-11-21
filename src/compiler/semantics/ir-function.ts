@@ -884,7 +884,14 @@ class FunctionBody {
           this.finish({ k: "return", value: null });
           return;
         }
-        const value = this.typed(fieldOfValue(statement, "value") as Expression, this.returns, Number(fieldOfValue(statement, "line"))).value;
+        let value = this.typed(fieldOfValue(statement, "value") as Expression, this.returns, Number(fieldOfValue(statement, "line"))).value;
+        // A function declared to answer a dynamic number may return a wide
+        // whole: `number | bigint` is that number at the call site, and the
+        // conversion is the one `Number(whole)` makes.
+        const answerType = fieldOfValue(this.returns, "type") as SemanticType;
+        if (answerType.kind === "primitive" && answerType.name === "f64" && isWideType(value.type)) {
+          value = fieldOfValue(this.runtimeCall("Number", [value], F64), "value") as SemanticValue;
+        }
         // A concise body that answers a call returning nothing — `() => f()`
         // where `f` is a void function — runs the call for what it does and
         // hands back nothing: a function declared to return nothing cannot

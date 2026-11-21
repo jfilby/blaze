@@ -285,6 +285,18 @@ test("an index that arrived as text is read as a number", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the element read resolves");
 });
 
+test("a wide result answers a function declared to return a number", () => {
+  const source = [
+    "function wide(text: string): bigint { return BigInt(text); }",
+    "export function demo(text: string): number | bigint { return wide(text); }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the wide result converts");
+});
+
 test("negating an unsigned wide number writes its two's complement", () => {
   const source = [
     "export function demo(n: u256): u256 { return -n; }",
