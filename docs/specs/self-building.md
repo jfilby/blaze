@@ -370,15 +370,30 @@ methods among them — and the fixes have small regressions in
   `yield*` writes every element the delegated list holds, and `Generator<T>`
   states the element type the caller walks. The JSON store's batched writes
   now read, and both backends run a generator end to end.
+- a function written as a field value carries its signature into the module
+  value's shape, so `const table = { fn: f }; table.fn()` is the call of the
+  function the field holds; the module value's initializer is re-shaped once
+  the file's signatures are known, past the shape cached before the prescan;
+- a pair map's second callback parameter is the position it walks, not the
+  element, so `new Map(items.map((item, index) => [item.key, index]))` writes
+  the index into the value rather than adding a number to the record;
+- `Object.hasOwn` on an object a function returns asks the keys the literal
+  declared: a constant key is answered outright and a dynamic key is the
+  comparison against each declared key;
+- a folded equality or `Array.isArray` truth carries its boolean marker, an
+  absent conditional arm takes the present arm's type, a wide shift count
+  narrows to the machine word, a wide result converts at a number return, and
+  a byte block passes where a file text is expected.
 
 The object layout pass and the C driver build: both read their statements,
 shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear. A self-build now passes the contract and IR phases
-for the whole compiler tree: an index that arrived as text is read as a number,
-negating an unsigned wide number writes its two's complement, and a dynamic
-value written into a list slot reads the block the runtime lays down. The build
-is then in codegen; fixed point is not yet verified. The later spec slices and
-the fixed point test remain.
+The frontend gate is clear: `test/self-host.test.ts` passes with 107 sources
+and zero refusals, and `test/self-host-ir.test.ts` resolves every compiler
+contract into IR. A self-build advances one function at a time as the IR
+validator finds a mismatch; each fix has a regression in
+`test/self-build-regressions.test.ts`. The build has not yet completed, and
+fixed point is not verified. The fixed-point test
+(`test/fixed-point.test.ts`) is in place but opt-in.
