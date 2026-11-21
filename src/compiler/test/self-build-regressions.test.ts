@@ -285,6 +285,24 @@ test("an index that arrived as text is read as a number", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the element read resolves");
 });
 
+test("fieldOf on a named record reads the field at its type", () => {
+  const source = [
+    "function fieldOf(value: unknown, key: string): any { return value; }",
+    "interface Size { value: number; next: number }",
+    "export function demo(size: Size): number {",
+    "  return (fieldOf(size, `next`) as number) + (fieldOf(size, `value`) as number);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const read2 = readTypeScriptModule(source, "module.ts", false);
+  const fn2 = read2.analysis.functions.find((one) => one.name === "demo");
+  const handle = fn2?.handle as { body?: unknown } | undefined;
+  const body = JSON.stringify(handle?.body ?? []);
+  assert.match(body, /"k":"call","name":"fieldOf"/, "the fields are read by key");
+});
+
 test("a wide result answers a function declared to return a number", () => {
   const source = [
     "function wide(text: string): bigint { return BigInt(text); }",

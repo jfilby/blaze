@@ -1959,6 +1959,28 @@ class FunctionBody {
     const functions = fieldOfValue(context, "functions") as Record<string, FunctionContract>;
     const callArgs = fieldOfValue(expression, "args") as Expression[];
     const callName = String(fieldOfValue(expression, "name"));
+    // `fieldOf(record, key)` reads a field of a record the frontend laid out,
+    // using the key written at the call. Its declared `any` cannot carry the
+    // field's type, so the read resolves it from the named layout: an add over
+    // two such fields is then a number operation, not one over two references.
+    if ((callName === "fieldOf" || callName.endsWith("__fieldOf")) && callArgs.length === 2) {
+      const base = this.typed(callArgs[0] as Expression, null, line);
+      const key = this.typed(callArgs[1] as Expression, null, line);
+      const keyValue = fieldOfValue(key, "value") as SemanticValue;
+      const field = keyValue.k === "const" ? String(fieldOfValue(keyValue, "text")) : null;
+      const inferred = fieldOfValue(base, "inferred") as Inferred;
+      const named = inferred.kind === "type" && inferred.type.kind === "ref" ? inferred.type.name : null;
+      const layout = named === undefined || named === null || this.objects[named] === undefined ? null : this.objects[named];
+      const declared = field !== null && layout !== null
+        ? (fieldOfValue(layout, "fields") as readonly { name: string; type: string }[]).find((one) => one.name === field)
+        : undefined;
+      if (declared !== undefined) {
+        const type = parseType(String(fieldOfValue(declared, "type")));
+        const object = fieldOfValue(base, "value") as SemanticValue;
+        const read: SemanticValue = { k: "loadField", type, object, layout: named as string, field: field as string };
+        return { value: read, inferred: asType(type) };
+      }
+    }
     // A value the read could not settle. The read refuses the construct where
     // it is written; this is where a refusal that did not survive in the
     // declaration's trial becomes one the build reports, rather than a zero the
