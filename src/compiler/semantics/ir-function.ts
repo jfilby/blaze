@@ -2841,7 +2841,7 @@ class FunctionBody {
       return { value: { k: "const", type: numberAt(expect) ?? F64, text: `-${String(fieldOfValue(operandExpression, "text"))}` }, inferred: DOUBLE };
     }
     const operand = this.typed(operandExpression, null, line);
-    const operandValue = fieldOfValue(operand, "value") as SemanticValue;
+    let operandValue = fieldOfValue(operand, "value") as SemanticValue;
     const operandInferred = fieldOfValue(operand, "inferred") as Inferred;
     if (op === "+") return operand;
     if (op === "!") {
@@ -2891,7 +2891,11 @@ class FunctionBody {
         `a number is not a truth, so the body says what it means by it`,
       );
     }
+    // A numeric operator on a dynamic value reads the number the runtime holds
+    // in it, so a negation or a complement of an unshaped operand is a number
+    // operation rather than one over references.
     let type = numberAt(operandInferred) ?? numeric(operandInferred, operandInferred);
+    if (!isNumber(type)) type = F64;
     // An unsigned wide number has no value below zero: the negated answer is
     // the signed wide carrier's two's complement, which is the host whole the
     // source reports for a negative magnitude.

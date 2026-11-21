@@ -829,3 +829,18 @@ test("BigInt of a number passed to a machine word is that number", () => {
   const read = readTypeScriptModule(source, "module.ts", false);
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
+
+test("a dynamic loop bound rounds at a number, not a reference", () => {
+  const source = [
+    "function fieldOf(v: unknown, k: string): any { return v; }",
+    "export function demo(value: unknown): number {",
+    "  const bound = fieldOf(value, `limbs`);",
+    "  let sum = 0;",
+    "  for (let i = 0; i < bound; i += 1) sum += i;",
+    "  return sum;",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the bound converts to a number");
+});

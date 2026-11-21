@@ -1178,9 +1178,19 @@ export function compoundAsBinary(
  */
 export function roundedBound(bound: SemanticValue, ceiling: boolean): SemanticValue {
   const number: SemanticType = { kind: "primitive", name: "f64" };
-  const type = vf(bound,"type") as SemanticType;
+  // A dynamic bound is read at the number the runtime holds in it before the
+  // rounding arithmetic: `Math.floor(-bound)` has no answer over a reference.
+  const type = isNumber(vf(bound,"type") as SemanticType) ? vf(bound,"type") as SemanticType : number;
+  const operand: SemanticValue = type === vf(bound,"type")
+    ? bound
+    : { k: "call", type: number, call: {
+        callee: "blaze_rt_number_of_ref",
+        signature: { name: "blaze_rt_number_of_ref", symbol: "blaze_rt_number_of_ref", params: [{ name: "argument0", type: "ref<any>" }], returns: "f64" },
+        args: [bound], argTypes: [{ kind: "ref", of: null }], returns: number,
+        effects: [], ownership: "none", retain: false, builtin: true,
+      } };
   // A ceiling is the floor of the negated bound, negated again: `-floor(-x)`.
-  const argument: SemanticValue = ceiling ? { k: "unary", type, op: "neg", operand: bound } : bound;
+  const argument: SemanticValue = ceiling ? { k: "unary", type, op: "neg", operand } : operand;
   const floor: SemanticValue = {
     k: "call",
     type: number,

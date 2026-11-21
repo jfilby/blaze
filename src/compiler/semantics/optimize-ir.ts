@@ -47,7 +47,7 @@ import type {
   Ownership,
   SemanticReduction,
 } from "../core/semantic-ir.ts";
-import { hasCall, isInteger, isTextType, isUnsigned, isWideType, slotType, statementBlocksOf, statementValues, typeEquals, walkValues, TEXT } from "../core/semantic-ir.ts";
+import { hasCall, isInteger, isNumber, isTextType, isUnsigned, isWideType, slotType, statementBlocksOf, statementValues, typeEquals, walkValues, TEXT } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { restructureHotFunction } from "./restructure.ts";
@@ -971,7 +971,8 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         // does, so it is the negation; a float does not, because `0.0 - 0.0`
         // is a positive zero and negating a zero is a negative one, so that
         // form is left as the subtraction it was written as.
-        if (String(fieldOf(value, "op")) === "sub" && left === 0 && isInteger(fieldOf(value, "type") as SemanticType)) {
+        if (String(fieldOf(value, "op")) === "sub" && left === 0 && isInteger(fieldOf(value, "type") as SemanticType) &&
+            isNumber((fieldOf(value, "right") as SemanticValue).type)) {
           return { k: "unary", type: fieldOf(value, "type") as SemanticType, op: "neg", operand: fieldOf(value, "right") as SemanticValue };
         }
         if (String(fieldOf(value, "op")) === "div" && left === 0 && right !== null && right !== 0) {
