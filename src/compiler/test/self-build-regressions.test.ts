@@ -764,7 +764,18 @@ test("a pair map's index parameter is the position, not the element", () => {
   const functions = read.analysis.functions.map((one) => one.name);
   const collect = functions.find((name) => name.startsWith("__collect_"));
   assert.ok(collect !== undefined, "a collect helper was written");
-  const helper = read.analysis.functions.find((one) => one.name === collect);
+  const helper = read.analysis.functions.find((one) => one.name === collect) as { handle?: { body?: unknown } } | undefined;
   const body = JSON.stringify(helper?.handle?.body ?? []);
   assert.match(body, /"right":\{"k":"ident","name":"at"\}/, "the index is the loop position");
+});
+
+test("Object.hasOwn on an object a function returns reads the keys it declared", () => {
+  const source = [
+    "const T = { a: 1, b: 2 };",
+    "function table(): { a: number; b: number } { return T; }",
+    "export function demo(k: string): boolean { return Object.hasOwn(table(), k); }",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the declared keys answer the question");
 });

@@ -14110,6 +14110,24 @@ class TypeScriptParser {
               replace(answer);
               continue;
             }
+            // An object a function returns whole carries the keys its literal
+            // wrote. `Object.hasOwn` asks whether the key names one of them:
+            // a constant key is answered outright, and a dynamic key is the
+            // comparison against each key the record holds.
+            const shape = this.shapeOf(receiver);
+            if (shape !== null && shape.kind === "record" && fieldOf(shape, "index") === null) {
+              const names = [...(fieldOf(shape, "fields") as Map<string, ResolvedField>).keys()];
+              const literal = textValue(key);
+              const answer: Expression = literal !== null
+                ? { k: "literal", text: names.includes(literal) ? "1" : "0", boolean: true }
+                : names.reduce<Expression>((soFar, name) => ({
+                    k: "binary", op: "||", left: soFar,
+                    right: { k: "binary", op: "===", left: key, right: { k: "text", parts: [{ k: "text", value: name }] } },
+                  }), { k: "literal", text: "0", boolean: true });
+              this.expressionTypes.set(answer, BOOLEAN_RESULT);
+              replace(answer);
+              continue;
+            }
           }
           this.report(
             "hasOwnProperty asks a record keyed by text",
