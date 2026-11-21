@@ -2562,10 +2562,15 @@ class FunctionBody {
     // A wide result is computed over two wide numbers. An operand of a
     // narrower whole type is widened into a name of the wide type, which is
     // the store the backends already widen at; a literal is the value itself.
-    const leftWide = this.wideOperand(fieldOfValue(left, "value") as SemanticValue, type, line);
+    // A dynamic operand — a field read off a value the source did not type —
+    // is read at the number the runtime holds in it, so an add or a product
+    // over it is a number operation rather than one over two references.
+    const leftNumber = this.asNumber(fieldOfValue(left, "value") as SemanticValue);
+    const rightNumber = this.asNumber(fieldOfValue(right, "value") as SemanticValue);
+    const leftWide = this.wideOperand(leftNumber, type, line);
     // A shift's right side is the machine word of count, not the shifted
     // value's width: it is read as one above and is not widened with it.
-    const rightWide = counted || converting ? fieldOfValue(right, "value") as SemanticValue : this.wideOperand(fieldOfValue(right, "value") as SemanticValue, type, line);
+    const rightWide = counted || converting ? rightNumber : this.wideOperand(rightNumber, type, line);
     const folded = this.foldedValue(arithmetic, leftWide, rightWide, type);
     if (folded !== null) return folded;
     // A wide remainder is the kernels' answer, not the machine's: the product
@@ -3346,6 +3351,13 @@ class FunctionBody {
   /** A value as the text a string carries it as. */
   private asText(value: SemanticValue): SemanticValue {
     return isText(fieldOfValue(value, "type") as SemanticType) ? value : { k: "toText", type: TEXT, of: value, digits: null };
+  }
+
+  /** A dynamic value read at the number the runtime holds in it. */
+  private asNumber(value: SemanticValue): SemanticValue {
+    return isNumber(fieldOfValue(value, "type") as SemanticType)
+      ? value
+      : fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [value], F64), "value") as SemanticValue;
   }
 
   /* ---------------------------------------------------------------------- */
