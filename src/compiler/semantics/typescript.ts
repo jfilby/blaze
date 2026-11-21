@@ -4930,6 +4930,25 @@ class TypeScriptParser {
         break;
       }
       case "call": {
+        // `fieldOf(record, "key")` reads a field of a record the shape carries,
+        // so the read holds the field's shape: a `.slice()` on it is the list's
+        // method and a `.trim()` on it is the text's.
+        const callName = String(fieldOf(value, "name"));
+        if (callName === "fieldOf" || callName.endsWith("__fieldOf")) {
+          const args = fieldOf(value, "args") as Expression[];
+          if (args.length === 2) {
+            const key = textValue(args[1] as Expression);
+            const record = this.shapeOf(args[0] as Expression);
+            if (key !== null && record !== null && record.kind === "record" && record.index === null) {
+              const field = (fieldOf(record, "fields") as Map<string, ResolvedField>).get(key);
+              if (field !== undefined) shape = field.type;
+            }
+          }
+          if (shape !== null) {
+            this.expressionShapes.set(value, shape);
+            break;
+          }
+        }
         // `structuredClone(x)` is a copy of `x`, so the shape it holds is the
         // shape `x` holds: a field of the copy is a field of the source.
         if (

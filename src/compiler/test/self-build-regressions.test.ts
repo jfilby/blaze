@@ -312,6 +312,19 @@ test("a wide result answers a function declared to return a number", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the wide result converts");
 });
 
+test("fieldOf's field shape decides a chained method on an unshaped read", () => {
+  const source = [
+    "function fieldOf(v: unknown, k: string): any { return v; }",
+    "interface L { params: string[] }",
+    "export function demo(l: L, n: number): unknown {",
+    "  return fieldOf(l, 'params').slice(n);",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "slice is the list's method");
+});
+
 test("negating an unsigned wide number writes its two's complement", () => {
   const source = [
     "export function demo(n: u256): u256 { return -n; }",
