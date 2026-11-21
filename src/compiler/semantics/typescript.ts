@@ -3650,6 +3650,16 @@ function fileHoldsWideBigint(tokens: readonly Token[]): boolean {
       continue;
     }
     if (value > 9223372036854775807n || value < -9223372036854775808n) return true;
+    // A shift by a count past the machine word makes a wide value even where
+    // both written operands are small: `1n << 256n` is 2^256, which no i64
+    // holds. Such a file's bigints are the wide carrier.
+    if (tokens[index + 1]?.text === "<<" && tokens[index + 2]?.kind === "bigint") {
+      try {
+        if (BigInt((tokens[index + 2] as Token).text) >= 64n) return true;
+      } catch {
+        /* not a count the language reads */
+      }
+    }
   }
   return false;
 }
