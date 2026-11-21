@@ -312,6 +312,17 @@ test("a wide result answers a function declared to return a number", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the wide result converts");
 });
 
+test("a wide number shifts by a machine-word count", () => {
+  const source = [
+    "export function demo(n: bigint, shift: bigint): bigint {",
+    "  return n << shift;",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the shift count narrows");
+});
+
 test("an absent conditional arm takes the type the other arm answers", () => {
   const source = [
     "export function demo(flag: boolean): string[] {",

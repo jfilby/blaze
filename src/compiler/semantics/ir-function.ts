@@ -2416,6 +2416,16 @@ class FunctionBody {
     // language reads its sides as, so it is read as one of those.
     const counted = op === "<<" || op === ">>";
     const right = this.typed(fieldOfValue(expression, "right") as Expression, counted ? asType(USIZE) : converting ? asType(U32) : null, line);
+    // A shift count is a machine word even where the source held it as a wide
+    // number: the kernel takes one word of count, so narrow the wide carrier to
+    // the low word rather than shifting by a 256-bit count.
+    if (counted) {
+      const rv = fieldOfValue(right, "value") as SemanticValue;
+      if (isWideType(rv.type)) {
+        const narrowed = fieldOfValue(this.runtimeCall("Number", [rv], F64), "value") as SemanticValue;
+        setFieldValue(right, "value", narrowed);
+      }
+    }
     // Asking whether a value is there is a different question from comparing
     // two of them, and one the IR states on its own.
     if (EQUALITY.includes(op) && ((fieldOfValue(expression, "left") as Expression).k === "null" || (fieldOfValue(expression, "right") as Expression).k === "null")) {
