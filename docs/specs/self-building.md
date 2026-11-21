@@ -376,11 +376,9 @@ shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear. A self-build now lowers `evaluate` and fails in
-`preconditionFailures` on an index read through a value asserted as a list.
-References and texts cross to the number a dynamic parameter reads, a dynamic
-value at a wide-number parameter takes the whole its number names, a name whose
-type is unknown asks the runtime for its length, and a dynamic value asserted
-as a list reads the block the runtime lays down. What remains is that index
-read, the later spec slices, and the fixed point test. Fixed point is not
-reached yet.
+The frontend gate is clear. A self-build now passes the contract and IR phases
+for the whole compiler tree: an index that arrived as text is read as a number,
+negating an unsigned wide number writes its two's complement, and a dynamic
+value written into a list slot reads the block the runtime lays down. The build
+is then in codegen; fixed point is not yet verified. The later spec slices and
+the fixed point test remain.

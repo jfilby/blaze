@@ -797,6 +797,20 @@ class FunctionBody {
         if (String(fieldOfValue(statement, "op")) === "=" && slot.kind === "primitive" && slot.name === "f64" && value.type.kind === "ref") {
           written = fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [value], F64), "value") as SemanticValue;
         }
+        // A signed wide value written into an unsigned wide slot keeps the same
+        // four limbs: only the reading of them changes.
+        if (slot.kind === "primitive" && slot.name === "u256" && written.type.kind === "primitive" && written.type.name === "i256") {
+          written = { ...written, type: slot } as SemanticValue;
+        }
+        // A dynamic value written into a list slot is read as the block the
+        // runtime lays down for its entries.
+        if ((slot.kind === "slice" || slot.kind === "array") && (written.type.kind === "ref" || written.type.kind === "primitive")) {
+          const handle = written.type.kind === "ref"
+            ? fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [written], F64), "value") as SemanticValue
+            : written;
+          const listed = fieldOfValue(this.runtimeCall("blaze_rt_dict_values_from_handle", [handle], ANY_REF), "value") as SemanticValue;
+          written = { ...listed, type: slot } as SemanticValue;
+        }
         // A wide number has no compound operator a backend can write, and a
         // floor division has no compound form C has, so the compound is
         // written as the binary form every backend either writes or refuses
@@ -1454,8 +1468,14 @@ class FunctionBody {
         // A value asserted as a list may still carry the text or reference it
         // arrived as: the element read is at the type the assertion declared.
         const sequenceValue = this.isBufferValue(baseValue.type) ? baseValue : { ...baseValue, type: declaredSequence } as SemanticValue;
+        let position = fieldOfValue(this.typed(fieldOfValue(expression, "index") as Expression, WHOLE, line), "value") as SemanticValue;
+        // An index destructured from an entry may arrive as a text when the
+        // pair's carrier was not typed: the number it names is the position.
+        if (!isNumber(position.type)) {
+          position = fieldOfValue(this.runtimeCall("Number", [position], F64), "value") as SemanticValue;
+        }
         return {
-          value: { k: "element", type: element, of: sequenceValue, index: this.typed(fieldOfValue(expression, "index") as Expression, WHOLE, line).value },
+          value: { k: "element", type: element, of: sequenceValue, index: position },
           inferred: asType(element),
         };
       }
@@ -2808,7 +2828,16 @@ class FunctionBody {
         `a number is not a truth, so the body says what it means by it`,
       );
     }
-    const type = numberAt(operandInferred) ?? numeric(operandInferred, operandInferred);
+    let type = numberAt(operandInferred) ?? numeric(operandInferred, operandInferred);
+    // An unsigned wide number has no value below zero: the negated answer is
+    // the signed wide carrier's two's complement, which is the host whole the
+    // source reports for a negative magnitude.
+    if (op === "-" && type.kind === "primitive" && type.name === "u256") {
+      // An unsigned wide number has no value below zero: the negated answer is
+      // the two's complement the subtraction from zero writes in its four limbs.
+      const zero: SemanticValue = { k: "const", type, text: "0" };
+      return { value: { k: "arith", type, op: "sub", left: zero, right: operandValue }, inferred: asType(type) };
+    }
     return { value: { k: "unary", type, op: UNARY[op as SourceUnaryOp], operand: operandValue }, inferred: asType(type) };
   }
 

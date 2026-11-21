@@ -268,6 +268,50 @@ test("the length of a dynamic value asks the runtime", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the length reads resolve");
 });
 
+test("an index that arrived as text is read as a number", () => {
+  const source = [
+    "function entry(): [string, string] { return [`a`, `b`]; }",
+    "export function demo(): string {",
+    "  const pair = entry();",
+    "  const at = pair[0] as unknown as number;",
+    "  const words = [`x`, `y`];",
+    "  return words[at];",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the element read resolves");
+});
+
+test("negating an unsigned wide number writes its two's complement", () => {
+  const source = [
+    "export function demo(n: u256): u256 { return -n; }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the negation resolves");
+});
+
+test("a dynamic value written into a list slot reads its block", () => {
+  const source = [
+    "function fieldOf(value: unknown, key: string): unknown { return value; }",
+    "export function demo(value: unknown): number {",
+    "  let items: number[] = [];",
+    "  items = fieldOf(value, `items`) as number[];",
+    "  return items.length;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the assignment resolves");
+});
+
 test("a dynamic value asserted as a list reads through the runtime", () => {
   const source = [
     "function fieldOf(value: unknown, key: string): unknown { return value; }",
