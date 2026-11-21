@@ -1095,6 +1095,15 @@ class FunctionBody {
     if ((init.k === "call" || init.k === "ident") && declaredType !== null && declaredType.kind === "ref" && declaredType.name !== undefined && writtenValue.type.kind === "primitive" && writtenValue.type.name === "f64") {
       writtenValue = fieldOfValue(this.runtimeCall("blaze_pointer_of_handle", [writtenValue], ANY_REF), "value") as SemanticValue;
     }
+    // A dynamic value asserted as a list is the block the runtime lays down
+    // for its entries: `fieldOf(x, "requires") as string[]` is that list.
+    if (declaredType !== null && (declaredType.kind === "slice" || declaredType.kind === "array") && (writtenValue.type.kind === "ref" || writtenValue.type.kind === "primitive")) {
+      const handle = writtenValue.type.kind === "ref"
+        ? fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [writtenValue], F64), "value") as SemanticValue
+        : writtenValue;
+      const listed = fieldOfValue(this.runtimeCall("blaze_rt_dict_values_from_handle", [handle], ANY_REF), "value") as SemanticValue;
+      writtenValue = { ...listed, type: parseType(contractText(declaredType)) } as SemanticValue;
+    }
     this.bind(declaredName, { name: declaredName, inferred: bound(fieldOfValue(value, "inferred") as Inferred, annotation), slot });
     if (init.k === "member") {
       const base = fieldOfValue(init, "base") as Expression;
@@ -1435,13 +1444,18 @@ class FunctionBody {
           const stop: SemanticValue = { k: "arith", type: F64, op: "add", left: key.value, right: one };
           return this.runtimeCall("blaze_rt_text_slice", [baseValue, key.value, stop], TEXT);
         }
-        if (!this.isBufferValue(baseValue.type)) {
+        const baseInferred = fieldOfValue(base, "inferred") as Inferred;
+        const declaredSequence = baseInferred.kind === "type" && this.isBufferValue(baseInferred.type) ? baseInferred.type : null;
+        if (!this.isBufferValue(baseValue.type) && declaredSequence === null) {
           const key = this.typed(fieldOfValue(expression, "index") as Expression, null, line);
           return this.dynamicIndexRead(base, key, expect);
         }
-        const element = elementOf(fieldOfValue(base, "inferred") as Inferred);
+        const element = elementOf(baseInferred);
+        // A value asserted as a list may still carry the text or reference it
+        // arrived as: the element read is at the type the assertion declared.
+        const sequenceValue = this.isBufferValue(baseValue.type) ? baseValue : { ...baseValue, type: declaredSequence } as SemanticValue;
         return {
-          value: { k: "element", type: element, of: baseValue, index: this.typed(fieldOfValue(expression, "index") as Expression, WHOLE, line).value },
+          value: { k: "element", type: element, of: sequenceValue, index: this.typed(fieldOfValue(expression, "index") as Expression, WHOLE, line).value },
           inferred: asType(element),
         };
       }
@@ -2084,6 +2098,20 @@ class FunctionBody {
         // a service that takes a number reads it through the handle service.
         if (paramType.kind === "primitive" && paramType.name === "f64" && value.type.kind === "ref") {
           value = fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [value], F64), "value") as SemanticValue;
+        }
+        // A dynamic value at a wide-number parameter is read as the whole its
+        // text or number says, the same conversion `BigInt(value)` makes.
+        if (paramType.kind === "primitive" && paramType.name === "u256" && value.type.kind === "ref") {
+          const number = fieldOfValue(this.runtimeCall("blaze_rt_number_of_ref", [value], F64), "value") as SemanticValue;
+          const wide = this.wideKernel("BigInt", [number]);
+          if (wide !== null) value = wide;
+        }
+        // A machine-word whole passed where a wide number is read is widened
+        // into its low limb; the high limb is zero.
+        if (paramType.kind === "primitive" && paramType.name === "u256" && isNumber(value.type) && !isWideType(value.type)) {
+          const zero: SemanticValue = { k: "const", type: { kind: "primitive", name: "u64" }, text: "0" };
+          const widened = this.wideKernel("u256_from_u64x2", [value, zero]);
+          if (widened !== null) value = widened;
         }
         return { ...typed, value };
       });

@@ -268,6 +268,33 @@ test("the length of a dynamic value asks the runtime", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the length reads resolve");
 });
 
+test("a dynamic value asserted as a list reads through the runtime", () => {
+  const source = [
+    "function fieldOf(value: unknown, key: string): unknown { return value; }",
+    "export function demo(parsed: unknown): number {",
+    "  const lines = fieldOf(parsed, `requires`) as string[];",
+    "  return lines.length;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the asserted list resolves");
+});
+
+test("a machine whole passed to a wide parameter is widened", () => {
+  const source = [
+    "function takesWide(n: u256): u256 { return n; }",
+    "export function demo(n: bigint): u256 { return takesWide(n); }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the wide call resolves");
+});
+
 test("keys of an empty literal are an empty list", () => {
   const source = [
     "export function demo(): number {",
