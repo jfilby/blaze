@@ -844,3 +844,15 @@ test("a dynamic loop bound rounds at a number, not a reference", () => {
   const { fn, contract } = resolved(source, "demo");
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the bound converts to a number");
 });
+
+test("a negated literal beside a wide number widens with its sign folded in", () => {
+  const source = [
+    "export function demo(flag: boolean, wide: u256): u256 {",
+    "  const small = flag ? -1n : 1n;",
+    "  return small * wide;",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the small side widens");
+});

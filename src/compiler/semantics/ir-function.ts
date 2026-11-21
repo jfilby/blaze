@@ -3324,6 +3324,17 @@ class FunctionBody {
         if (held !== undefined) return this.wideOperand(fieldOfValue(held, "value") as SemanticValue, type, line);
       }
     }
+    // A negation of a literal is the literal's negation at the wide width:
+    // `-1` beside a wide number is a wide `-1`, not a machine word. Fold the
+    // sign into the digits so no unsigned wide number is ever negated.
+    if (value.k === "unary" && String(fieldOfValue(value, "op")) === "neg") {
+      const operand = fieldOfValue(value, "operand") as SemanticValue;
+      if (operand.k === "const") {
+        const text = String(fieldOfValue(operand, "text"));
+        const folded = wholeConstant(-(BigInt(text)), type);
+        if (folded !== null) return folded;
+      }
+    }
     // A choice of two written values is widened in both arms: it is the value
     // of either, and neither arm needs a store to become the wide number.
     if (value.k === "select") {
