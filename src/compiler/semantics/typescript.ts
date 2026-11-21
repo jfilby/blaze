@@ -20458,17 +20458,16 @@ class TypeScriptParser {
       return made;
     };
     const take = (): { name: string; args: Expression[]; returns: TypeExpr } | null => {
+      // A set or map whose key was declared text can still be asked about a
+      // reference: the runtime keys such a value by the handle it names.
+      const keyTypeOf = (): TypeExpr => {
+        const written = this.valueTypeOf(args[0] as Expression);
+        return written.kind === "ref" ? written : (fieldOf(collection, "key") as TypeExpr);
+      };
       if (collection.kind === "set") {
-        if (method === "add" && args.length === 1) {
-          return {
-            name: this.dictionaryCall((fieldOf(collection, "key") as TypeExpr), "set") ?? "blaze_rt_dict_set",
-            args: [receiver, args[0] as Expression, one],
-            returns: NUMBER_RESULT,
-          };
-        }
         if (method === "has" && args.length === 1) {
           return {
-            name: this.dictionaryCall((fieldOf(collection, "key") as TypeExpr), "has") ?? "blaze_rt_dict_has",
+            name: this.dictionaryCall(keyTypeOf(), "has") ?? "blaze_rt_dict_has",
             args: [receiver, args[0] as Expression],
             returns: BOOLEAN_RESULT,
           };
@@ -20477,9 +20476,16 @@ class TypeScriptParser {
           // The runtime answers whether the key was there as one or zero, which
           // is the truth `Map.delete` declares; `Map.has` is typed the same way.
           return {
-            name: this.dictionaryCall((fieldOf(collection, "key") as TypeExpr), "delete") ?? "blaze_rt_dict_delete",
+            name: this.dictionaryCall(keyTypeOf(), "delete") ?? "blaze_rt_dict_delete",
             args: [receiver, args[0] as Expression],
             returns: BOOLEAN_RESULT,
+          };
+        }
+        if (method === "add" && args.length === 1) {
+          return {
+            name: this.dictionaryCall(keyTypeOf(), "set") ?? "blaze_rt_dict_set",
+            args: [receiver, args[0] as Expression, one],
+            returns: NUMBER_RESULT,
           };
         }
         return null;
@@ -20495,7 +20501,7 @@ class TypeScriptParser {
       if ((method === "has" || method === "delete") && args.length === 1) {
         const operation = method === "has" ? "has" : "delete";
         return {
-          name: this.dictionaryCall(collection.key, operation) ?? "blaze_rt_dict_has",
+          name: this.dictionaryCall(keyTypeOf(), operation) ?? "blaze_rt_dict_has",
           args: [receiver, ...args],
           returns: BOOLEAN_RESULT,
         };
