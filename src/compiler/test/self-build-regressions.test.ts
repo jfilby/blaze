@@ -312,6 +312,17 @@ test("a wide result answers a function declared to return a number", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the wide result converts");
 });
 
+test("a logical with a truth beside a number hands back the number", () => {
+  const source = [
+    "export function demo(flag: boolean, n: number): number {",
+    "  return flag || n;",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the logical is valid");
+});
+
 test("a folded Array.isArray test is a boolean a negation accepts", () => {
   const source = [
     "function fieldOf(v: unknown, k: string): any { return v; }",

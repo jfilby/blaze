@@ -1226,11 +1226,12 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // value the operator hands back. This is the reading the program pass
       // gives the same two arms.
       const arms: [SemanticType, SemanticType] = [(fieldOf(value, "left") as SemanticValue).type, (fieldOf(value, "right") as SemanticValue).type];
-      const holds = arms.filter((arm) => convertibleTo(arm, fieldOf(value, "type") as SemanticType));
-      // The arms are both of the type, or one of them is the test that decides
-      // whether the other is handed back and the other is of the type.
-      const tests = arms.filter((arm) => isNumber(arm) || isBoolean(arm)).length;
-      if (!(holds.length === arms.length || (holds.length === 1 && tests === 1))) {
+      // Every arm either holds what the operator answers or is the number-like
+      // test that decides which arm is handed back. A truth beside a number is
+      // the number's test: both arms are number-like, and the number is handed
+      // back.
+      const foreign = arms.filter((arm) => !convertibleTo(arm, fieldOf(value, "type") as SemanticType) && !isNumber(arm) && !isBoolean(arm));
+      if (foreign.length > 0) {
         problems.push(`${prefix}${String(fieldOf(value, "op"))} over a ${typeText(arms[0])} and a ${typeText(arms[1])} is a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
       return problems;
