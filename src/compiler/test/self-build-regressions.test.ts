@@ -794,3 +794,16 @@ test("a class method's unannotated default parameter takes the default's type", 
   const { fn, contract } = resolved(source, "C_reserve");
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the alignment is a number");
 });
+
+test("Map.delete answers the truth a boolean method declares", () => {
+  const source = [
+    "class SetOf {",
+    "  private map: Map<string, number> = new Map();",
+    "  delete(key: string): boolean { return this.map.delete(key); }",
+    "}",
+    "export function demo(): boolean { const s = new SetOf(); return s.delete(`a`); }",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "SetOf_delete");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "delete is a truth");
+});

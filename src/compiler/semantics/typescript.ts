@@ -20474,10 +20474,12 @@ class TypeScriptParser {
           };
         }
         if (method === "delete" && args.length === 1) {
+          // The runtime answers whether the key was there as one or zero, which
+          // is the truth `Map.delete` declares; `Map.has` is typed the same way.
           return {
             name: this.dictionaryCall((fieldOf(collection, "key") as TypeExpr), "delete") ?? "blaze_rt_dict_delete",
             args: [receiver, args[0] as Expression],
-            returns: NUMBER_RESULT,
+            returns: BOOLEAN_RESULT,
           };
         }
         return null;
@@ -20495,7 +20497,7 @@ class TypeScriptParser {
         return {
           name: this.dictionaryCall(collection.key, operation) ?? "blaze_rt_dict_has",
           args: [receiver, ...args],
-          returns: method === "has" ? BOOLEAN_RESULT : NUMBER_RESULT,
+          returns: BOOLEAN_RESULT,
         };
       }
       return null;
