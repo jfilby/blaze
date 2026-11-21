@@ -388,6 +388,9 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
     if (typeEquals(left, right)) return true;
     if (isNumber(left) && isNumber(right)) return true;
     if (isReference(left) && isReference(right)) return true;
+    // An unshaped element is the dynamic value the runtime holds, read at the
+    // element type the sequence states where it is used.
+    if (kindOf(left) === "ref" && ofOf(left) === null && nameOf(left) === undefined) return true;
     return false;
   }
   return false;

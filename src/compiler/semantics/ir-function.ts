@@ -2397,8 +2397,16 @@ class FunctionBody {
       const type = isText((fieldOfValue(left, "value") as SemanticValue).type) || (unshaped && isText((fieldOfValue(right, "value") as SemanticValue).type))
         ? TEXT
         : this.typeOf(held, line);
+      // An unshaped left arm is the runtime value the assertion on the source
+      // names at the right arm's type: `fieldOf(x, "extra") ?? []` reads that
+      // field as the list the fallback states.
+      const leftValue = fieldOfValue(left, "value") as SemanticValue;
+      const rightValue = fieldOfValue(right, "value") as SemanticValue;
+      const readLeft = leftValue.type.kind === "ref" && leftValue.type.of === null && leftValue.type.name === undefined && !isNumber(type) && !isBoolean(type)
+        ? { ...leftValue, type } as SemanticValue
+        : leftValue;
       return {
-        value: { k: "coalesce", type, left: fieldOfValue(left, "value") as SemanticValue, right: fieldOfValue(right, "value") as SemanticValue },
+        value: { k: "coalesce", type, left: readLeft, right: rightValue },
         inferred: held,
       };
     }
