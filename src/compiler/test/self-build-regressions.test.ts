@@ -848,8 +848,7 @@ test("a dynamic loop bound rounds at a number, not a reference", () => {
 test("a negated literal beside a wide number widens with its sign folded in", () => {
   const source = [
     "export function demo(flag: boolean, wide: u256): u256 {",
-    "  const small = flag ? -1n : 1n;",
-    "  return small * wide;",
+    "  return (flag ? -1n : 1n) * wide;",
     "}",
     "main();",
   ].join("\n");
