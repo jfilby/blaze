@@ -953,6 +953,11 @@ function wideningReason(value: SemanticValue, as: SemanticType): string | null {
   // Widening to a signed wide number sign-extends, so a signed whole number is
   // the same number there as well.
   if (targetSigned && isInteger(value.type)) return null;
+  // A narrow whole written into an unsigned wide slot keeps its bits: a signed
+  // value sign-extends into the upper limbs, which the wide kernels read as the
+  // same number modulo 2^256. That is how a folded small bigint reaches a wide
+  // declaration.
+  if (isInteger(value.type) && as.kind === "primitive" && as.name === "u256") return null;
   if (isFloat(value.type)) return "a double is not a set of limbs";
   if (isNumber(value.type)) return targetSigned ? "a whole number is not a set of limbs" : "a signed whole number holds values below zero that a wide number does not";
   return "a wide number is four limbs, and this is not one of them";

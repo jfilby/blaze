@@ -354,7 +354,10 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   // renders it as one at the use: a text read of a dynamic value is the
   // reading the language itself answers, which is how a body of a request
   // arrives as the text it is.
-  if (isTextType(to) && kindOf(from) === "ref" && ofOf(from) === null && nameOf(from) === undefined) return true;
+  if (isTextType(to) && kindOf(from) === "ref") return true;
+  // A text is carried as the pointer it names, which is the reference a
+  // container of handles reads: the two share the one word at the machine.
+  if (isTextType(from) && isReference(to)) return true;
   // The other reading of a value the runtime holds: the number it says. It is
   // the same reading the language gives `Number(v)` and `+v`, and a parsed
   // document read at a number is that reading.
