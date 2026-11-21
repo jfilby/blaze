@@ -807,3 +807,15 @@ test("Map.delete answers the truth a boolean method declares", () => {
   const { fn, contract } = resolved(source, "SetOf_delete");
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "delete is a truth");
 });
+
+test("an untyped field read is a number when it is added", () => {
+  const source = [
+    "function fieldOf(v: unknown, k: string): any { return v; }",
+    "export function demo(arg: unknown, bytes: number): number {",
+    "  return bytes + (fieldOf(arg, `at`) as number);",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the dynamic operand reads as a number");
+});
