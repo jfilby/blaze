@@ -357,7 +357,7 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   if (isTextType(to) && kindOf(from) === "ref") return true;
   // A text or a truth is carried as the word a handle names: the two share
   // the one machine word, so either reads as a reference at the use.
-  if ((isTextType(from) || isBoolean(from) || (isNumber(from) && !isWideType(from))) && isReference(to)) return true;
+  if ((isTextType(from) || isBoolean(from) || isNumber(from)) && isReference(to)) return true;
   // The other reading of a value the runtime holds: the number it says. It is
   // the same reading the language gives `Number(v)` and `+v`, and a parsed
   // document read at a number is that reading.
@@ -370,6 +370,10 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
     if (!isWideType(from)) return true;
     return isWideType(to);
   }
+  // A truth is a machine word whose one and zero are the numbers one and zero.
+  if (isBoolean(from) && isNumber(to) && !isWideType(to)) return true;
+  // The number a dictionary holds as a key is the text that spells it.
+  if (isNumber(from) && isTextType(to) && !isWideType(from)) return true;
   if (isTextType(from) && isTextType(to)) return true;
   // A text is carried as the pointer it names, which is the number a dynamic
   // parameter reads: a value of a union that includes text reaches such a

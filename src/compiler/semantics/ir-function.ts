@@ -3349,6 +3349,9 @@ class FunctionBody {
         );
         if (held !== undefined) return this.wideOperand(fieldOfValue(held, "value") as SemanticValue, type, line);
       }
+      // A narrow field read beside a wide number is widened by the kernel that
+      // reads its low limb; the comparison or arithmetic then has two wide sides.
+      if (fieldOfValue(value, "type") !== undefined) return { ...value, type } as SemanticValue;
     }
     // A negation of a literal is the literal's negation at the wide width:
     // `-1` beside a wide number is a wide `-1`, not a machine word. Fold the
