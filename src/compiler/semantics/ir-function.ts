@@ -2172,6 +2172,15 @@ class FunctionBody {
           const widened = this.wideKernel("u256_from_u64x2", [value, zero]);
           if (widened !== null) value = widened;
         }
+        // A `BigInt(number)` passed where a machine whole is read is that
+        // number: the wide carrier was only the type `bigint` asks for, and the
+        // low limb the callee reads is the number it was built from.
+        if (paramType.kind === "primitive" && paramType.name === "i64" && isWideType(value.type) &&
+            value.k === "call" && fieldOfValue(value, "call") !== undefined &&
+            String(fieldOfValue(fieldOfValue(value, "call"), "callee")) === "BigInt") {
+          const from = fieldOfValue(fieldOfValue(value, "call"), "args") as readonly SemanticValue[];
+          if (from.length === 1 && isNumber(from[0]?.type as SemanticType)) value = from[0] as SemanticValue;
+        }
         return { ...typed, value };
       });
       const returns = parseType(String(fieldOfValue(signature, "returns")));

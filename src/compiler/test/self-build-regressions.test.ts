@@ -819,3 +819,13 @@ test("an untyped field read is a number when it is added", () => {
   const { fn, contract } = resolved(source, "demo");
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the dynamic operand reads as a number");
 });
+
+test("BigInt of a number passed to a machine word is that number", () => {
+  const source = [
+    "declare function move(register: number, value: bigint): void;",
+    "export function demo(count: number): void { move(0, BigInt(count)); }",
+    "main();",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
