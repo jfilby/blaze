@@ -895,6 +895,9 @@ function narrowsTo(held: SemanticType, read: SemanticType): boolean {
     return left !== null && right !== null && narrowsTo(left, right);
   }
   if (!isNumber(held) || !isNumber(read)) return false;
+  // A narrow whole held in a slot widens into a wide read: the upper limbs are
+  // the extension of the word the slot holds.
+  if (isWideType(read) && !isWideType(held)) return true;
   if (isWideType(held) || isWideType(read)) return false;
   // A whole number held as a double is every value the slot can hold, said as
   // the wider of the two — which is the arm `whole-numbers.ts` writes past the
