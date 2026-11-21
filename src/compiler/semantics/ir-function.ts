@@ -2565,13 +2565,19 @@ class FunctionBody {
     // language and a true division in another, and a remainder takes the sign
     // of its left side in one and of its divisor in the other.
     const rules = rulesFor(String(fieldOfValue(fieldOfValue(this, "context"), "language")));
+    // A shift by a count past the machine word reaches a value no narrow whole
+    // holds, so the result is the wide carrier and the shifted side widens.
+    const shiftCount = op === "<<" ? (fieldOfValue(right, "value") as SemanticValue) : null;
+    const wideShift = shiftCount !== null && shiftCount.k === "const" && Number(shiftCount.text) >= 64;
     const type = op === "/" && rules.division === "true"
       ? F64
       : converting
         ? U32
-        : WHOLE_OPERATORS[op] === true
-          ? wholeResult(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred)
-          : numeric(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred);
+        : wideShift
+          ? { kind: "primitive", name: "u256" } as SemanticType
+          : WHOLE_OPERATORS[op] === true
+            ? wholeResult(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred)
+            : numeric(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred);
     const arithmetic = op === "%" && rules.remainder === "floored" ? "floorMod" : (ARITHMETIC[op] as ArithOp);
     // A power of whole numbers is a whole number: it is folded where both sides
     // are constant, written out as the products it is where the exponent is a
