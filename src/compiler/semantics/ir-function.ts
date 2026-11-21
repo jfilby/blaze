@@ -1985,8 +1985,8 @@ class FunctionBody {
           }
         }
       }
-      const layout = named === undefined || named === null ? null : this.objects[named];
-      const declared = field !== null && layout !== null
+      const layout = named === undefined || named === null ? undefined : this.objects[named];
+      const declared = field !== null && layout !== undefined
         ? (fieldOfValue(layout, "fields") as readonly { name: string; type: string }[]).find((one) => one.name === field)
         : undefined;
       if (declared !== undefined) {
