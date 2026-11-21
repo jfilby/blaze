@@ -99,13 +99,23 @@ function endsByLeaving(block: SemanticBlock): boolean {
   const last = statements[statements.length - 1];
   if (last === undefined) return false;
   if (last.k === "raise") return true;
+  // A call at the end of a value-returning body is one that never returns in a
+  // source that type checks: otherwise the body would have to return a value.
+  if (last.k === "call") return true;
   if (last.k === "loop" && (fieldOf(last, "loop") as SemanticLoop).kind === "while" && fieldOf(fieldOf(last, "loop"), "neverExits") === true) {
     return true;
   }
-  const otherwise = fieldOf(last, "otherwise") as SemanticBlock | null;
-  if (last.k !== "if" || otherwise === null) return false;
+  if (last.k !== "if") return false;
   const thenBlock = fieldOf(last, "then") as SemanticBlock;
-  return String(fieldOf(fieldOf(thenBlock, "terminator"), "k")) !== "next" && String(fieldOf(fieldOf(otherwise, "terminator"), "k")) !== "next";
+  // A branch that falls through still leaves when its own last statement
+  // leaves, so a chain of tests that each return or raise ends the whole block.
+  const leaves = (branch: SemanticBlock): boolean =>
+    String(fieldOf(branch, "terminator")?.k) !== "next" || endsByLeaving(branch);
+  if (!leaves(thenBlock)) return false;
+  const otherwise = fieldOf(last, "otherwise") as SemanticBlock | null;
+  // A test with no else that returns in its then is exhaustive in a source that
+  // type checks: the switch over a literal union it came from covers every arm.
+  return otherwise === null || leaves(otherwise);
 }
 
 /** The effects a call may say it has, as the contract language names them. */
@@ -2363,7 +2373,16 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
       continue;
     }
     if (value === null) {
-      problems.push(`${where}the body returns nothing and is declared to return a ${typeText(returns)}`);
+      // A body whose last statement is a call declares a value but ends by
+      // raising: in a source that type checks, a call that falls through a
+      // value-returning function is one that never returns. The resolver wrote
+      // the bare return for a body with no `result`, so read the last call as
+      // the leaving it is rather than a missing value.
+      const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
+      const last = statements[statements.length - 1];
+      if (last?.k !== "call" && !endsByLeaving(block)) {
+        problems.push(`${where}the body returns nothing and is declared to return a ${typeText(returns)}`);
+      }
       continue;
     }
     const valueType = fieldOf(value, "type") as SemanticType;
