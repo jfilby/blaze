@@ -12,7 +12,7 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { run } from "../core/process.ts";
@@ -20,12 +20,30 @@ import { run } from "../core/process.ts";
 const enabled = process.env["BLAZE_FIXED_POINT"] === "1";
 const root = resolve(import.meta.dirname ?? ".", "..");
 const project = join(root, "blaze.toml");
-const recordPath = join(root, ".blaze", "projects", "compiler", "build.json");
+const state = join(root, ".blaze");
 
-function delivered(): string {
-  const record = JSON.parse(readFileSync(recordPath, "utf8")) as { outputPath?: string };
-  assert.ok(record.outputPath !== undefined && existsSync(record.outputPath), "the stage delivered a binary");
-  return record.outputPath as string;
+interface BuildStatus {
+  status?: string;
+  output?: string;
+}
+
+function inspect(compiler: string[]): BuildStatus {
+  const result = run(compiler[0] as string, [...compiler.slice(1), "inspect", "compiler"], {
+    cwd: root,
+    timeoutMs: 60 * 1000,
+  });
+  assert.equal(result.code, 0, `${compiler.join(" ")} inspect failed:\n${result.stderr}`);
+  return JSON.parse(result.stdout) as BuildStatus;
+}
+
+/** The binary a stage delivered, which the next stage runs. */
+function delivered(compiler: string[]): string {
+  const status = inspect(compiler);
+  assert.equal(status.status, "success", `the stage did not build: ${JSON.stringify(status)}`);
+  assert.ok(status.output !== undefined, "the stage has no output path");
+  const binary = resolve(state, status.output as string);
+  assert.ok(existsSync(binary), `the stage did not deliver ${binary}`);
+  return binary;
 }
 
 function build(compiler: string[]): void {
@@ -49,16 +67,16 @@ test("the native compiler reaches a fixed point over the compiler tree", { skip:
   // Stage 1 is built by Node from the installed tree.
   const node = ["node", join(root, "cli.ts")];
   build(node);
-  const stage1 = delivered();
+  const stage1 = delivered(node);
 
   // Stage 2 and stage 3 are built by the previous stage's binary.
   const one = [stage1];
   build(one);
-  const stage2 = delivered();
+  const stage2 = delivered(one);
 
   const two = [stage2];
   build(two);
-  const stage3 = delivered();
+  const stage3 = delivered(two);
 
   // The IR a stage answers for the same function is the fixed point: a
   // difference means a stage changed what it resolves from the same source.
@@ -70,8 +88,4 @@ test("the native compiler reaches a fixed point over the compiler tree", { skip:
     assert.equal(fromTwo, fromOne, `${fn} changed between stage 1 and stage 2`);
     assert.equal(fromThree, fromTwo, `${fn} changed between stage 2 and stage 3`);
   }
-
-  // The build record's selected candidate is what a stage delivers, and a
-  // difference there is a different answer to the same build.
-  void stage3;
 });
