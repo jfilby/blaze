@@ -368,7 +368,9 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   if (isBoolean(to) && kindOf(from) === "ref") return true;
   if (isNumber(from) && isNumber(to)) {
     if (!isWideType(from)) return true;
-    return isWideType(to);
+    // A wide whole read at a machine word keeps its low limb, the narrowing a
+    // direct assignment makes; widening keeps the value as it was.
+    return true;
   }
   // A truth is a machine word whose one and zero are the numbers one and zero.
   if (isBoolean(from) && isNumber(to) && !isWideType(to)) return true;
@@ -395,6 +397,9 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
     if (typeEquals(left, right)) return true;
     if (isNumber(left) && isNumber(right)) return true;
     if (isReference(left) && isReference(right)) return true;
+    // An element that converts to the other sequence's element type makes the
+    // sequences convertible, so a list of words reads as a list of handles.
+    if (convertibleTo(left, right)) return true;
     // An unshaped element is the dynamic value the runtime holds, read at the
     // element type the sequence states where it is used.
     if (kindOf(left) === "ref" && ofOf(left) === null && nameOf(left) === undefined) return true;

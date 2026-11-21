@@ -217,6 +217,10 @@ const COUNTED_OPERATIONS: ReadonlySet<string> = new Set(["shl", "shr"]);
 function widePairProblem(left: SemanticValue, right: SemanticValue, result: SemanticType, counted: boolean): string | null {
   if (!isWideType(left.type) && !isWideType(right.type) && !isWideType(result)) return null;
   if (!isWideType(result)) {
+    // A dynamic operand beside a wide number reads at the wide width: the
+    // runtime value is the whole the wide kernel compares.
+    const dynamic = (t: SemanticType): boolean => t.kind === "ref" && t.of === null && t.name === undefined;
+    if ((isWideType(left.type) && dynamic(right.type)) || (isWideType(right.type) && dynamic(left.type))) return null;
     return `a ${typeText(left.type)} and a ${typeText(right.type)} are read as a ${typeText(result)}, and a wide number is not a machine word`;
   }
   // The left side is the value being operated on and the right one is the
