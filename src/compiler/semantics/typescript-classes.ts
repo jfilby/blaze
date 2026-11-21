@@ -358,6 +358,16 @@ function readParams(
       index = skipValue(tokens, index, limit, true);
       defaultEnd = index;
     }
+    // A parameter with a default and no annotation holds the type the default
+    // writes: `reserve(bytes: number, alignment = 8)` takes a number, not the
+    // unshaped reference an unannotated parameter otherwise names.
+    if (typeName === "any" && defaultStart >= 0) {
+      const first = tokens[defaultStart];
+      if (first?.kind === "number") typeName = "number";
+      else if (first?.kind === "bigint") typeName = "bigint";
+      else if (first?.kind === "string") typeName = "string";
+      else if (first?.text === "true" || first?.text === "false") typeName = "boolean";
+    }
     params.push({ name, typeName, property, defaultStart, defaultEnd, ...(optional ? { optional: true } : {}), line });
     if (isPunct(tokens[index], ",")) {
       index += 1;

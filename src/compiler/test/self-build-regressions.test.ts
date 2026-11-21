@@ -779,3 +779,18 @@ test("Object.hasOwn on an object a function returns reads the keys it declared",
   const { fn, contract } = resolved(source, "demo");
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the declared keys answer the question");
 });
+
+test("a class method's unannotated default parameter takes the default's type", () => {
+  const source = [
+    "class C { used = 0;",
+    "  private reserve(bytes: number, alignment = 8): number {",
+    "    this.used = Math.ceil((this.used + bytes) / alignment) * alignment;",
+    "    return this.used - bytes;",
+    "  }",
+    "  run(): number { return this.reserve(4); }",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "C_reserve");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the alignment is a number");
+});
