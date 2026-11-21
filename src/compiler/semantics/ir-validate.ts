@@ -1848,7 +1848,9 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     isReference(fieldOf(call, "returns") as SemanticType);
   if (returned === null) {
     problems.push(`${prefix}${callee} declares a return type that is not a type`);
-  } else if (!carried && !typeEquals(returned, fieldOf(call, "returns") as SemanticType)) {
+  } else if (!carried && !settlesAny && !typeEquals(returned, fieldOf(call, "returns") as SemanticType)) {
+    // A settle function answers nothing: the builtin's untyped reference only
+    // says it takes whatever the promise carries, not what it hands back.
     problems.push(`${prefix}${callee} returns a ${typeText(fieldOf(call, "returns") as SemanticType)} and is declared to return a ${typeText(returned)}`);
   }
 
