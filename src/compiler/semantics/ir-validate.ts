@@ -1455,7 +1455,8 @@ function fieldReadsAs(declared: SemanticType, read: SemanticType): boolean {
  * is. A wide number is four limbs and has no such word, so writing one where a
  * double is read is the low half of a value the program never computed. */
 function wordHandle(from: SemanticType, to: SemanticType): boolean {
-  const word = (type: SemanticType): boolean => isReference(type) || (isNumber(type) && !isWideType(type)) || isTextType(type);
+  const word = (type: SemanticType): boolean => isReference(type) || isBoolean(type) || (isNumber(type) && !isWideType(type)) || isTextType(type);
+  if (isBoolean(from) && isBoolean(to)) return false;
   return word(from) && word(to) && !typeEquals(from, to);
 }
 
