@@ -376,10 +376,11 @@ shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. Inside `toolchain/ir-wasm.ts` the
 module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
-The frontend gate is clear. A self-build now lowers `machineRefusalOf` too, and
-fails in `runBuild` where `unitContract` answers a dictionary handle that the
-source views as a named record. A record written into a dictionary slot crosses
-through `blaze_rt_number_of_ref`, and a cast of a value that is already a
-reference no longer crosses it to a pointer. What remains is that second
-declare conversion, the later spec slices, and the fixed point test. Fixed
-point is not reached yet.
+The frontend gate is clear. A self-build now lowers `runBuild`, `runStored`,
+`runSemanticIr` and `machineRefusalOf`, and fails in `projectStateLine` where an
+empty object fallback reaches `Object.keys` as a record rather than a
+dictionary. Carriers now cross at the IR declare where the annotation says
+which one is wanted, rather than in the cast: a reference is not crossed to a
+pointer twice, and a dictionary handle viewed as a record crosses once. What
+remains is that fallback, the later spec slices, and the fixed point test.
+Fixed point is not reached yet.

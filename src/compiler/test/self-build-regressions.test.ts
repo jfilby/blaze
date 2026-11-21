@@ -240,6 +240,21 @@ test("a rest function type is called at the arity the source wrote", () => {
   arityOf(handle?.body ?? []);
 });
 
+test("keys of an empty literal are an empty list", () => {
+  const source = [
+    "export function demo(): number {",
+    "  const selected = {} as Record<string, string>;",
+    "  return Object.keys(selected).length;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const fn = read.analysis.functions.find((one) => one.name === "demo");
+  const handle = fn?.handle as { body?: unknown } | undefined;
+  assert.doesNotMatch(JSON.stringify(handle?.body ?? []), /__refused_/, "the read has no refused hole");
+});
+
 test("a dictionary handle viewed as a named record crosses at the declare", () => {
   // The contract pass reads the result of `unitContract` as a dictionary
   // handle; viewing it as a named record crosses through the pointer it names.

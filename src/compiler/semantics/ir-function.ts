@@ -1092,7 +1092,7 @@ class FunctionBody {
     // `unitContract` answers a dictionary handle, and the source views that
     // handle as a named record: cross through the pointer it names. Other
     // calls already answer references and must not cross again.
-    if (init.k === "call" && init.name === "unitContract" && declaredName === "contract" && declaredType !== null && declaredType.kind === "ref" && declaredType.name !== undefined && writtenValue.type.kind === "primitive" && writtenValue.type.name === "f64") {
+    if ((init.k === "call" || init.k === "ident") && declaredType !== null && declaredType.kind === "ref" && declaredType.name !== undefined && writtenValue.type.kind === "primitive" && writtenValue.type.name === "f64") {
       writtenValue = fieldOfValue(this.runtimeCall("blaze_pointer_of_handle", [writtenValue], ANY_REF), "value") as SemanticValue;
     }
     this.bind(declaredName, { name: declaredName, inferred: bound(fieldOfValue(value, "inferred") as Inferred, annotation), slot });

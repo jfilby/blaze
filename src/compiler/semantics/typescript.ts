@@ -12025,7 +12025,14 @@ class TypeScriptParser {
     let left = this.readLogicalOr();
     while (this.at("??")) {
       this.next();
+      // A `?? {}` whose use expects a dictionary gives the fallback that
+      // dictionary shape, so the empty literal is the empty dictionary rather
+      // than a record with no fields.
+      const dictionary = this.expectedShape !== null && this.expectedShape.kind === "record" && this.expectedShape.index !== null ? this.expectedShape : null;
+      const savedShape = this.expectedShape;
+      if (dictionary !== null) this.expectedShape = dictionary;
       const right = this.readLogicalOr();
+      this.expectedShape = savedShape;
       // `values ?? []`: the list on the right holds the element type the value
       // on the left names, which is what the language infers there too. A use
       // that expects a number says nothing about the list written inside.
@@ -15152,40 +15159,16 @@ class TypeScriptParser {
           this.expressionTypes.set(current(), type);
           if (!constAssertion) this.assertedValues.add(current());
         }
-        // A value the read holds as an untyped reference is a registry handle,
-        // while a field read of a named layout takes the address the handle
-        // names. An assertion that gives the value a named reference type has
-        // to cross that boundary where it is written, or a field of the cast
-        // reads from the handle's bits as an address and faults.
-        const namedHeld = current().k === "ident"
-          ? this.valueTypes.get((current() as { name: string }).name)
-          : undefined;
-        const alreadyPointer = namedHeld !== undefined && namedHeld.kind === "ref" && namedHeld.name !== undefined;
-        // A value that already names a reference is the address the layout
-        // expects: crossing it to a pointer would hand the callee a handle
-        // where it reads a pointer.
-        const namedSource = (assertedFrom.kind === "ref" && assertedFrom.name !== undefined && !unknownReference(assertedFrom)) || ["index", "object", "member", "call"].includes(current().k);
         // A named record viewed as `Record<string, V>` is a dictionary handle:
-        // the pointer is the number the runtime's keyed reads take.
+        // the pointer is the number the runtime's keyed reads take. The other
+        // crossing - a handle viewed as a named record - is made in the IR,
+        // where the slot's declared type says which carrier is wanted.
         if (shape !== null && shape.kind === "record" && shape.index !== null &&
             assertedFrom.kind === "ref" && assertedFrom.name !== undefined) {
           const asNumber: Expression = { k: "call", name: "blaze_rt_number_of_ref", args: [current()], returns: NUMBER_RESULT };
           this.expressionTypes.set(asNumber, NUMBER_RESULT);
           replace(asNumber);
           continue;
-        }
-        if (type.kind === "ref" && type.name !== undefined && unknownReference(assertedFrom) && !alreadyPointer && !namedSource) {
-          const resolved: Expression = { k: "call", name: "blaze_pointer_of_handle", args: [current()] };
-          // The service answers an unshaped pointer. The layout the assertion
-          // named travels as the shape beside it, not as the expression's type:
-          // stating the named reference here would make a caller read the
-          // pointer as a typed handle.
-          this.expressionTypes.set(resolved, ANY_TYPE);
-          // The assertion named the layout the value holds: carry its shape
-          // onto the pointer read, so a field of it keeps the type the source
-          // wrote even though the handle was crossed to a pointer here.
-          if (shape !== null) this.expressionShapes.set(resolved, shape);
-          replace(resolved);
         }
         continue;
       }
@@ -18519,6 +18502,12 @@ class TypeScriptParser {
    */
   private objectMembers(method: "keys" | "values", args: readonly Expression[]): Expression {
     const value = args[0];
+    // An empty literal has no keys regardless of the carrier the use gave it.
+    if (value !== undefined && value.k === "object" && (fieldOf(value, "fields") as readonly unknown[]).length === 0) {
+      const empty: Expression = { k: "buffer", element: "text", values: [] };
+      this.expressionTypes.set(empty, { kind: "slice", of: TEXT_RESULT });
+      return empty;
+    }
 
     // A record or a map built while the program runs is a dictionary, and its
     // entries are read by position: `Object.keys` is the keys it holds.
@@ -18536,6 +18525,11 @@ class TypeScriptParser {
     const shape = args.length === 1 && value !== undefined ? this.shapeOf(value) : null;
     if (shape !== null && shape.kind === "record" && shape.index === null && (fieldOf(shape, "arms") as ResolvedType[] | undefined) === undefined) {
       const names = [...(fieldOf(shape, "fields") as Map<string, ResolvedField>).keys()];
+      if (names.length === 0) {
+        const empty: Expression = { k: "buffer", element: "text", values: [] };
+        this.expressionTypes.set(empty, { kind: "slice", of: TEXT_RESULT });
+        return empty;
+      }
       if (method === "keys") {
         const keys: Expression = {
           k: "buffer",
@@ -22293,7 +22287,7 @@ class TypeScriptParser {
     // one of those values: `{ ...process.env }` has the fields the host says,
     // and a field written beside it would be one this read could not place.
     if (opaqueSpread) {
-      if (fieldSlot[0].length === 0) {
+      if (fieldSlot[0].length === 0 && expected !== null && expected.index !== null) {
         const marker: Expression = { k: "literal", text: "0" };
         this.expressionTypes.set(marker, { kind: "ref", of: null });
         return marker;
@@ -22442,6 +22436,13 @@ class TypeScriptParser {
         padded.push({ name, value: this.zeroFor(this.typeExprOfShape(declared.type)) });
       }
       if (padded.length !== fieldSlot[0].length) return { k: "object", fields: padded, written: [...written] };
+    }
+    // An empty object written where a dictionary is expected is the empty
+    // dictionary: `dict ?? {}` keeps the fallback a keyed read can answer.
+    if (fieldSlot[0].length === 0 && expected !== null && expected.index !== null) {
+      const empty: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] };
+      this.expressionTypes.set(empty, NUMBER_RESULT);
+      return empty;
     }
     return { k: "object", fields: fieldSlot[0] };
   }
