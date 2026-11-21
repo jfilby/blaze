@@ -1019,7 +1019,10 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         problems.push(`${prefix}an element is read at a ${typeText((fieldOf(value, "index") as SemanticValue).type)}, which is not a number`);
       }
       const element = elementTypeOf((fieldOf(value, "of") as SemanticValue).type);
-      if (element !== null && !typeEquals(element, fieldOf(value, "type") as SemanticType)) {
+      // An unshaped element is read at the type the use asserts: a dynamic
+      // value held in a list is the text or number the source reads it as.
+      if (element !== null && !typeEquals(element, fieldOf(value, "type") as SemanticType) &&
+          !convertibleTo(element, fieldOf(value, "type") as SemanticType)) {
         problems.push(`${prefix}an element of a ${typeText((fieldOf(value, "of") as SemanticValue).type)} is a ${typeText(element)}, not a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
       return problems;

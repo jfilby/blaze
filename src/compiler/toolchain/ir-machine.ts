@@ -11501,6 +11501,13 @@ class Machine {
       this.runtime("_argv");
       return;
     }
+    if (callee === "u256_low" && argument !== undefined) {
+      // The low limb is the machine word a narrow use reads: load the wide
+      // value into its four registers and hand the first one back.
+      this.wideValue(argument);
+      this.code.movRegReg(RAX, [8, 9, 10, 11][0] as number);
+      return;
+    }
     if (callee === "Math.fround" && args[0] !== undefined) {
       this.at(args[0], NUMBER);
       this.runtime("_fround");

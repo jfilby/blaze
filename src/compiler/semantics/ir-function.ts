@@ -2187,6 +2187,12 @@ class FunctionBody {
           const from = fieldOfValue(fieldOfValue(value, "call"), "args") as readonly SemanticValue[];
           if (from.length === 1 && isNumber(from[0]?.type as SemanticType)) value = from[0] as SemanticValue;
         }
+        // A wide value passed where a machine whole is read crosses a file
+        // whose `bigint` is the narrow carrier: read its low limb.
+        if (paramType.kind === "primitive" && paramType.name === "i64" && isWideType(value.type)) {
+          const low = this.wideKernel("u256_low", [value]);
+          if (low !== null) value = low;
+        }
         return { ...typed, value };
       });
       const returns = parseType(String(fieldOfValue(signature, "returns")));

@@ -317,6 +317,10 @@ function builtinTable(): Map<string, BuiltinSignature> {
    */
   ARGV, { params: [USIZE], returns: F64, arity: 1 });
 
+  table.set(/** `u256_low(value)` reads the low 64-bit limb of a wide number, the
+   *  machine word a caller sees when a narrow value is handed to it. */
+  "u256_low", { params: [U256], returns: I64, arity: 1 });
+
   table.set(/** `u256_from_u64x2(low, high)` builds a `u256` from two 64-bit halves, so a
    *  value that fits in 128 bits can be constructed from its low and high limbs
    *  and the upper limbs are zero. */
