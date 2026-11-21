@@ -960,6 +960,9 @@ function wideningReason(value: SemanticValue, as: SemanticType): string | null {
   if (isInteger(value.type) && as.kind === "primitive" && as.name === "u256") return null;
   if (isFloat(value.type)) return "a double is not a set of limbs";
   if (isNumber(value.type)) return targetSigned ? "a whole number is not a set of limbs" : "a signed whole number holds values below zero that a wide number does not";
+  // An absent value is a dynamic reference, and its zero is the zero of the
+  // wide slot it is written into.
+  if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) return null;
   return "a wide number is four limbs, and this is not one of them";
 }
 

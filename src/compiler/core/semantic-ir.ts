@@ -357,11 +357,11 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   if (isTextType(to) && kindOf(from) === "ref") return true;
   // A text or a truth is carried as the word a handle names: the two share
   // the one machine word, so either reads as a reference at the use.
-  if ((isTextType(from) || isBoolean(from)) && isReference(to)) return true;
+  if ((isTextType(from) || isBoolean(from) || (isNumber(from) && !isWideType(from))) && isReference(to)) return true;
   // The other reading of a value the runtime holds: the number it says. It is
   // the same reading the language gives `Number(v)` and `+v`, and a parsed
   // document read at a number is that reading.
-  if (isNumber(to) && kindOf(from) === "ref" && ofOf(from) === null && nameOf(from) === undefined) return true;
+  if (isNumber(to) && kindOf(from) === "ref" && !isWideType(to)) return true;
   // A dynamic value may hold a truth, so reading one as a bool is the same
   // reading the runtime gives a value it holds when a body asks a yes/no
   // question of it (`JSON.value === true`).
