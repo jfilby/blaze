@@ -2244,13 +2244,17 @@ class FunctionBody {
       const returns = declaredReturns === undefined ? fieldOfValue(builtin, "returns") as SemanticType : declaredReturns;
       const extreme = EXTREMES[callName];
       if (extreme !== undefined) {
+        // A min or max compares numbers: a value the read could not type is
+        // the number the runtime holds in it.
+        const left = this.asNumber(args[0].value as SemanticValue);
+        const right = this.asNumber(args[1].value as SemanticValue);
         return {
           value: {
             k: "arith",
-            type: this.common(args[0].value.type, args[1].value.type, line),
+            type: this.common(left.type, right.type, line),
             op: extreme,
-            left: args[0].value,
-            right: args[1].value,
+            left,
+            right,
           },
           inferred: asType(returns),
         };
