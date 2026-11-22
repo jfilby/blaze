@@ -876,3 +876,21 @@ test("a negated literal beside a wide number widens with its sign folded in", ()
   const { fn, contract } = resolved(source, "demo");
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the small side widens");
 });
+
+test("a deep copy of a list of untyped values validates", () => {
+  // The compiler's own frontend copies the call arguments it read — a list of
+  // untyped values — with structuredClone. The builtin is declared to take the
+  // untyped reference because the contract language has no one type for a
+  // number, text, reference and list, but the call carries the list's real
+  // type. The validator used to hold it against the builtin's reference and
+  // refuse the function.
+  const source = [
+    "export function demo(values: any[]): any[] {",
+    "  const copy = structuredClone(values);",
+    "  return copy;",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "a list is a value the deep copy takes");
+});

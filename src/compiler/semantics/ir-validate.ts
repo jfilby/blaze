@@ -1796,12 +1796,13 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   if (!allowed.includes(args.length)) {
     problems.push(`${prefix}${callee} is called with ${args.length} arguments and takes ${allowed.join(" or ")}`);
   }
-  // The settle functions of a promise take whatever the executor hands them:
-  // the value is the number, text, reference or nothing the promise carries,
-  // and the builtin's declared parameter is the untyped reference only because
-  // the contract language has no one type for all four.
-  const settlesAny = builtinFlag && (callee === "resolve" || callee === "onFulfilled" ||
-    callee === "reject" || callee === "onRejected");
+  // The settle functions of a promise take whatever the executor hands them,
+  // and the deep copy takes whatever value the source asks it to copy: the
+  // number, text, reference or list the value is. The builtin's declared
+  // parameter is the untyped reference only because the contract language has
+  // no one type for all of them; the call itself carries the real type.
+  const anyValue = builtinFlag && (callee === "resolve" || callee === "onFulfilled" ||
+    callee === "reject" || callee === "onRejected" || callee === "structuredClone");
   // A list service takes a block as the pointer it is whatever the elements the
   // block holds: the two sides of `[...a, ...b]` are lists of the one element
   // type the read fixed, and the service moves bytes.
@@ -1818,7 +1819,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     }
     const argument = argTypes[index];
     if (argument === undefined) continue;
-    if (settlesAny || listService || (stateCell && index === 1)) continue;
+    if (anyValue || listService || (stateCell && index === 1)) continue;
     // The first argument of a dictionary call is the handle the runtime's
     // dictionary is. A typed reference and the number it is held as are the
     // same word, and a body that reads a typed record through the dictionary
@@ -1859,9 +1860,10 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     isReference(fieldOf(call, "returns") as SemanticType);
   if (returned === null) {
     problems.push(`${prefix}${callee} declares a return type that is not a type`);
-  } else if (!carried && !settlesAny && !typeEquals(returned, fieldOf(call, "returns") as SemanticType)) {
-    // A settle function answers nothing: the builtin's untyped reference only
-    // says it takes whatever the promise carries, not what it hands back.
+  } else if (!carried && !anyValue && !typeEquals(returned, fieldOf(call, "returns") as SemanticType)) {
+    // A settle function answers nothing, and a deep copy answers the type of
+    // the value it copied: the builtin's untyped reference only says it takes
+    // any value, not what it hands back.
     problems.push(`${prefix}${callee} returns a ${typeText(fieldOf(call, "returns") as SemanticType)} and is declared to return a ${typeText(returned)}`);
   }
 
