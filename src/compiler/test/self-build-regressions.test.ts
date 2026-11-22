@@ -577,6 +577,11 @@ test("a number added to or compared with a text writes as text", () => {
   ].join("\n");
   const read = readTypeScriptModule(source, "module.ts", false);
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the addition resolves");
+  const ir = printSemanticFunction(fn);
+  assert.match(ir, /concat\[text\]/, "the addition is a text concatenation");
+  assert.match(ir, /to_text/, "the number is written as text");
 });
 
 test("an object returned at a declared type lays out its optional fields", () => {
