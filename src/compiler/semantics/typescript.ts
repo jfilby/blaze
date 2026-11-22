@@ -14491,6 +14491,18 @@ class TypeScriptParser {
           // positions and the elements at them. Reading it here would make a
           // list's index a text key of a dictionary.
           if ((target.field === "toISOString" || target.field === "getTime") && args.length === 0) {
+            // An instance of a class extending Date carries the time in its
+            // `__date` field, not in the handle the instance is held by. The
+            // inherited method reads that field; the generic date form below
+            // would mistake the handle for the milliseconds.
+            const owner = this.classOfExpression(receiver);
+            if (owner !== null && this.classExtendsDate(owner)) {
+              const lowered = this.dateMethod(receiver, target.field, args);
+              if (lowered !== null) {
+                replace(lowered);
+                continue;
+              }
+            }
             const held = this.valueTypeOf(receiver);
             if ((held.kind === "primitive" && held.name === "f64") || (held.kind === "ref" && held.of === null)) {
               if (target.field === "getTime") {
