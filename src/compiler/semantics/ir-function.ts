@@ -1120,10 +1120,14 @@ class FunctionBody {
     const value = this.typed(init, annotation, line);
     const slot = this.slot(declaredName, value, annotation, line);
     let writtenValue = fieldOfValue(value, "value") as SemanticValue;
-    // `unitContract` answers a dictionary handle, and the source views that
-    // handle as a named record: cross through the pointer it names. Other
-    // calls already answer references and must not cross again.
-    if ((init.k === "call" || init.k === "ident") && declaredType !== null && declaredType.kind === "ref" && declaredType.name !== undefined && writtenValue.type.kind === "primitive" && writtenValue.type.name === "f64") {
+    // A call or a name that answers a dictionary handle can be viewed as a
+    // named record: cross through the pointer the handle names. An unshaped
+    // reference is such a handle too, stored in the number the runtime holds;
+    // only a reference that already names a layout must not cross again.
+    if ((init.k === "call" || init.k === "ident") && declaredType !== null && declaredType.kind === "ref" && declaredType.name !== undefined && (
+      (writtenValue.type.kind === "primitive" && writtenValue.type.name === "f64") ||
+      (writtenValue.type.kind === "ref" && fieldOfValue(writtenValue.type, "name") === undefined)
+    )) {
       writtenValue = fieldOfValue(this.runtimeCall("blaze_pointer_of_handle", [writtenValue], ANY_REF), "value") as SemanticValue;
     }
     // A dynamic value asserted as a list is the block the runtime lays down
