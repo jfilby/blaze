@@ -2409,7 +2409,14 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
       // the leaving it is rather than a missing value.
       const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
       const last = statements[statements.length - 1];
-      if (last?.k !== "call" && !endsByLeaving(block)) {
+      // A lifted arrow answers through its capture box: the value a branch
+      // computes is written to the box, so there is no return statement.
+      const writesBox = (b: SemanticBlock | null): boolean => {
+        if (b === null || b === undefined) return false;
+        return (fieldOf(b, "statements") as readonly SemanticStatement[]).some((s) => s.k === "storeField" && String(fieldOf(fieldOf(s, "object"), "name")).startsWith("__box_"));
+      };
+      const boxedAnswer = last?.k === "if" && (writesBox(fieldOf(last, "then") as SemanticBlock) || writesBox(fieldOf(last, "otherwise") as SemanticBlock));
+      if (last?.k !== "call" && !boxedAnswer && !endsByLeaving(block)) {
         problems.push(`${where}the body returns nothing and is declared to return a ${typeText(returns)}`);
       }
       continue;
