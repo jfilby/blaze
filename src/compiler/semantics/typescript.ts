@@ -9429,9 +9429,13 @@ class TypeScriptParser {
       else this.valueShapes.delete(name.text);
       // A name declared with a value of a named record holds that record: the
       // initializer is a conditional the read types as a reference, and the
-      // shape is what says which declaration the reference points at.
+      // shape is what says which declaration the reference points at. The
+      // shape alone is not enough: `fieldOf(value, "offset")` on a union
+      // carries the union's shape while `valueTypeOf` reads its `any` as the
+      // number the arm beside it has, so a `let` of that choice is a number
+      // even though its shape names the record the key was read from.
       let declaredType: TypeExpr | null = type;
-      if (declaredType === null && declaredShape !== null && String(fieldOf(declaredShape, "kind")) === "ref") {
+      if (declaredType === null && declaredShape !== null && String(fieldOf(declaredShape, "kind")) === "ref" && initType.kind === "ref" && initType.name !== undefined) {
         const declaredName = fieldOf(declaredShape, "name") as string | null;
         if (declaredName !== null) declaredType = { kind: "ref", of: null, name: declaredName };
       }

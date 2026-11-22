@@ -895,6 +895,27 @@ test("a deep copy of a list of untyped values validates", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "a list is a value the deep copy takes");
 });
 
+test("a union's shape does not type a numeric field read as the union", () => {
+  // The compiler's own program parser reads `fieldOf(value, "offset")` where
+  // `value` is a union with one variant holding a `ProgramValue` under that
+  // key. The read's shape names the union, but the `let` of a choice between
+  // it and zero holds a number. The declaration used to take the shape's
+  // named reference as its type, so `offset += 1` was a write through a record
+  // reference rather than a number.
+  const source = [
+    "type P = { k: `a`; offset: P } | { k: `b`; offset: number };",
+    "function fieldOf(value: unknown, key: string): any { return (value as any)[key]; }",
+    "export function demo(v: P): number {",
+    "  let offset = v.k === `a` ? fieldOf(v, `offset`) : 0;",
+    "  offset += 1;",
+    "  return offset;",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the decision holds a number");
+});
+
 test("a void callback's concise body runs a value-returning call", () => {
   // The compiler's own frontend hands `(name) => called.add(name)` to a walk
   // that takes a void callback. The arrow is void, but the call its concise
