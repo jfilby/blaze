@@ -3309,6 +3309,26 @@ class Machine {
    * pointer turned, and a count it does not say is one a fill cannot be
    * written over.
    */
+  /**
+   * The count a bound value carries, including the one a fill helper answers.
+   *
+   * A fill writes the list it was handed, so the helper's answer has the count
+   * of its first argument. The helper's value parameter is the element type,
+   * while a helper that builds a new list takes a callback there; that is what
+   * tells the two apart without reading the helper's body.
+   */
+  private boundCountOf(value: SemanticValue): number | Held | null {
+    const count = this.boundElementsOf(value);
+    if (count !== null || String(fieldOf(value, "k")) !== "call") return count;
+    const call = fieldOf(value, "call") as Record<string, unknown>;
+    const params = fieldOf(call, "signature") as Record<string, unknown> | undefined;
+    const declared = params === undefined ? null : fieldOf(params, "params") as readonly { type?: unknown }[] | undefined;
+    const valueParameter = declared?.[1];
+    if (valueParameter === undefined || !isNumber(parseType(String(fieldOf(valueParameter, "type"))))) return null;
+    const first = (fieldOf(call, "args") as readonly SemanticValue[] | undefined)?.[0];
+    return first === undefined ? null : this.boundElementsOf(first);
+  }
+
   private boundElementsOf(value: SemanticValue): number | Held | null {
     if (String(fieldOf(value, "k")) !== "buffer") {
       // A name holds the count it was bound with whatever the array it holds is
@@ -3374,12 +3394,6 @@ class Machine {
       // where the call is made and hand it beside the pointer as any other
       // length. A view has no header of its own, so one with no remembered
       // count is still refused.
-      if (String(fieldOf(value, "k")) === "local" && isSequence(fieldOf(value, "type") as SemanticType) && !this.isView(value)) {
-        this.runtimeLength(value);
-        const held = this.hold(USIZE, "blaze_length");
-        this.store(held);
-        return held;
-      }
       throw machineError(
         `${String(fieldOf(this.fn, "symbol"))} hands over an array whose length it cannot settle`,
         "an array argument carries its length beside it, and the C backend carries it as an argument",
@@ -4919,7 +4933,9 @@ class Machine {
         }
         this.store(held);
         if (isSequence(type)) {
-          this.rememberElements(name, this.boundElementsOf(value));
+          // A capture box is a one-element cell handed to a closure, not an
+          // array whose length travels beside the pointer as an argument.
+          if (!name.startsWith("__box_")) this.rememberElements(name, this.boundCountOf(value));
           this.rememberView(name, value);
         }
         return;
@@ -12921,12 +12937,10 @@ class Machine {
     // number is not a conversion the accumulator has: the C backend reads the
     // number the value says, and this one refuses.
     if (isDynamicType(from) && isNumber(to)) {
-      // The handle's bits are in the accumulator; the service unwraps the
-      // value it names and answers the number it holds in XMM0.
-      this.code.movdXmm(XMM0, RAX);
-      this.numberToTaggedArgs();
-      this.runtime("_number_of_ref");
-      return;
+      throw machineError(
+        `a value the runtime holds is read as a ${typeText(to)}, which this backend has no lowering for`,
+        "the C backend reads the number the value says; write the program so the value is read where it is made, or build it with the C backend",
+      );
     }
     // A dynamic value is a handle: the runtime's double. A text and a number
     // written where one is expected are boxed into handles, and a handle read

@@ -6939,8 +6939,7 @@ class TypeScriptParser {
       if (fieldOf(declaration, "program") === true && runs) continue;
       for (const entry of fieldOf(declaration, "refusal") as { message: string; detail: string; line: number }[]) this.diagnostics.report(String(fieldOf(entry, "message")), String(fieldOf(entry, "detail")), Number(fieldOf(entry, "line")));
     }
-    const writtenGlobals = new Map([...this.numericGlobals].filter(([, id]) => this.numericReads.has(id)));
-    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable, this.importedTypeNames, writtenGlobals) : [];
+    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable, this.importedTypeNames, this.numericGlobals, this.numericReads) : [];
     // `export { f }` may name a function the file declared after it, so the
     // names are applied once the whole file has been read. A name no
     // declaration answers is refused here, where every other export is.
@@ -21666,9 +21665,12 @@ class TypeScriptParser {
         return { name: "", returns: ANY_TYPE };
     }
 
+    // A fill's second argument is the value written into every element, not a
+    // callback: typing it as the element keeps a number a number, where an
+    // unshaped parameter would box it and ask the callee to read the box back.
     const params = [
       { name: "items", type: items },
-      { name: "fn", type: ANY_TYPE },
+      { name: "fn", type: method === "fill" ? element : ANY_TYPE },
       ...(withInitial ? [{ name: "initial", type: ((fieldOf(signature, "params") as TypeExpr[])[0] ?? signature.returns) as TypeExpr }] : []),
     ];
     const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
@@ -26337,8 +26339,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     const fromStatements = tokensAfterImports(parser["tokens"]);
     const programDiagnostics = new Diagnostics();
     try {
-      const writtenGlobals = new Map([...parser["numericGlobals"]].filter(([, id]) => parser["numericReads"].has(id)));
-      const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens), writtenGlobals);
+      const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens), parser["numericGlobals"], parser["numericReads"]);
       if (programDiagnostics.entries.length === 0) {
         // The class functions were lowered from declarations the program
         // parser never sees, so they travel with the body: they are the

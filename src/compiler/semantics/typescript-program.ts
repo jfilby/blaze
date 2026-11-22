@@ -341,14 +341,16 @@ class ProgramParser {
   private currentClass: ClassInfo | null = null;
 
   private readonly numericGlobals: ReadonlyMap<string, string>;
+  private readonly numericReads: ReadonlySet<string>;
 
-  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable, imported: ReadonlySet<string> = new Set(), numericGlobals: ReadonlyMap<string, string> = new Map()) {
+  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable, imported: ReadonlySet<string> = new Set(), numericGlobals: ReadonlyMap<string, string> = new Map(), numericReads: ReadonlySet<string> = new Set()) {
     this.tokens = tokens;
     this.path = path;
     this.diagnostics = diagnostics;
     this.classTable = classTable ?? scanClasses(tokens);
     this.importedNames = imported;
     this.numericGlobals = numericGlobals;
+    this.numericReads = numericReads;
   }
 
   private peek(offset = 0): Token {
@@ -978,7 +980,7 @@ class ProgramParser {
     // cell so the function's read answers what the source wrote. The local
     // declaration stays for reads the body itself makes.
     const global = this.braceDepth === 0 ? this.numericGlobals.get(name) : undefined;
-    if (global !== undefined) {
+    if (global !== undefined && this.numericReads.has(global)) {
       this.pending.push({
         kind: "invoke",
         function: "blaze_rt_global_set",
@@ -3279,6 +3281,7 @@ export function parseProgramBody(
   classes?: ClassTable,
   imported: ReadonlySet<string> = new Set(),
   numericGlobals: ReadonlyMap<string, string> = new Map(),
+  numericReads: ReadonlySet<string> = new Set(),
 ): ProgramStatement[] {
-  return new ProgramParser(tokens, path, diagnostics, classes, imported, numericGlobals).body();
+  return new ProgramParser(tokens, path, diagnostics, classes, imported, numericGlobals, numericReads).body();
 }
