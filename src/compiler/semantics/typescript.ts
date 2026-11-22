@@ -4296,6 +4296,8 @@ class TypeScriptParser {
   private readonly state: ReadonlySet<string>;
   /** The module-level numbers the runtime holds in cells, by the cell's slot. */
   private readonly numericGlobals: ReadonlyMap<string, string>;
+  /** The cells a compiled function actually reads, which the program must write. */
+  private readonly numericReads = new Set<string>();
   /** The initializer of each module value, by the name it is bound to. */
   private readonly stateInitializers: ReadonlyMap<string, { start: number; end: number }>;
   /** The state names the file offers. */
@@ -6937,7 +6939,8 @@ class TypeScriptParser {
       if (fieldOf(declaration, "program") === true && runs) continue;
       for (const entry of fieldOf(declaration, "refusal") as { message: string; detail: string; line: number }[]) this.diagnostics.report(String(fieldOf(entry, "message")), String(fieldOf(entry, "detail")), Number(fieldOf(entry, "line")));
     }
-    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable, this.importedTypeNames, this.numericGlobals) : [];
+    const writtenGlobals = new Map([...this.numericGlobals].filter(([, id]) => this.numericReads.has(id)));
+    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable, this.importedTypeNames, writtenGlobals) : [];
     // `export { f }` may name a function the file declared after it, so the
     // names are applied once the whole file has been read. A name no
     // declaration answers is refused here, where every other export is.
@@ -13142,6 +13145,7 @@ class TypeScriptParser {
     const slot = this.numericGlobals.get(name);
     if (slot === undefined) return null;
     if (this.valueTypes.has(name) || this.valueShapes.has(name) || this.valueArrows.has(name) || this.valueClasses.has(name)) return null;
+    this.numericReads.add(slot);
     return slot;
   }
 
@@ -26333,7 +26337,8 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     const fromStatements = tokensAfterImports(parser["tokens"]);
     const programDiagnostics = new Diagnostics();
     try {
-      const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens), parser["numericGlobals"]);
+      const writtenGlobals = new Map([...parser["numericGlobals"]].filter(([, id]) => parser["numericReads"].has(id)));
+      const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens), writtenGlobals);
       if (programDiagnostics.entries.length === 0) {
         // The class functions were lowered from declarations the program
         // parser never sees, so they travel with the body: they are the

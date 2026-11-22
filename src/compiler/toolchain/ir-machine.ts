@@ -3368,6 +3368,18 @@ class Machine {
     }
     const count = this.boundElementsOf(value);
     if (count === null) {
+      // A sequence the runtime laid out carries its count in the header in
+      // front of it, even when no binding of this function recorded one: a
+      // call that hands back a list answers with that block. Read the count
+      // where the call is made and hand it beside the pointer as any other
+      // length. A view has no header of its own, so one with no remembered
+      // count is still refused.
+      if (String(fieldOf(value, "k")) === "local" && isSequence(fieldOf(value, "type") as SemanticType) && !this.isView(value)) {
+        this.runtimeLength(value);
+        const held = this.hold(USIZE, "blaze_length");
+        this.store(held);
+        return held;
+      }
       throw machineError(
         `${String(fieldOf(this.fn, "symbol"))} hands over an array whose length it cannot settle`,
         "an array argument carries its length beside it, and the C backend carries it as an argument",
@@ -4906,7 +4918,10 @@ class Machine {
           return;
         }
         this.store(held);
-        if (isSequence(type)) this.rememberView(name, value);
+        if (isSequence(type)) {
+          this.rememberElements(name, this.boundElementsOf(value));
+          this.rememberView(name, value);
+        }
         return;
       }
       case "set": {
@@ -10605,6 +10620,22 @@ class Machine {
     this.runtime("_string_new");
   }
 
+  /** The number of elements a runtime-laid-out sequence holds, in RAX. */
+  private runtimeLength(of: SemanticValue): void {
+    // A list a function holds is the block the runtime laid out: the header
+    // records the bytes it holds, so the count of elements is that many bytes
+    // divided by the width of one. Every element the IR names is a power of two
+    // wide, so the division is a shift, and the answer is the whole number the
+    // length is.
+    const element = elementTypeOf(fieldOf(of, "type"));
+    const bytes = element === null ? 8 : widthOf(element);
+    this.value(of);
+    this.code.movRegReg(RDI, RAX);
+    this.external("blaze_rt_object_size");
+    this.callForeign("blaze_rt_object_size");
+    this.code.shiftImm("shr", RAX, bytes === 1 ? 0 : bytes === 2 ? 1 : bytes === 4 ? 2 : 3);
+  }
+
   private length(of: SemanticValue): void {
     if (isTextType(fieldOf(of, "type"))) {
       // A string is as long as its bytes. The runtime counts a string it owns
@@ -10645,18 +10676,7 @@ class Machine {
       }
     }
     if (isSequence(fieldOf(of, "type"))) {
-      // A list a function holds is the block the runtime laid out: the header
-      // records the bytes it holds, so the count of elements is that many bytes
-      // divided by the width of one. Every element the IR names is a power of
-      // two wide, so the division is a shift, and the answer is the whole
-      // number the length is.
-      const element = elementTypeOf(fieldOf(of, "type"));
-      const bytes = element === null ? 8 : widthOf(element);
-      this.value(of);
-      this.code.movRegReg(RDI, RAX);
-      this.external("blaze_rt_object_size");
-      this.callForeign("blaze_rt_object_size");
-      this.code.shiftImm("shr", RAX, bytes === 1 ? 0 : bytes === 2 ? 1 : bytes === 4 ? 2 : 3);
+      this.runtimeLength(of);
       return;
     }
     throw machineError(
@@ -12901,10 +12921,12 @@ class Machine {
     // number is not a conversion the accumulator has: the C backend reads the
     // number the value says, and this one refuses.
     if (isDynamicType(from) && isNumber(to)) {
-      throw machineError(
-        `a value the runtime holds is read as a ${typeText(to)}, which this backend has no lowering for`,
-        "the C backend reads the number the value says; write the program so the value is read where it is made, or build it with the C backend",
-      );
+      // The handle's bits are in the accumulator; the service unwraps the
+      // value it names and answers the number it holds in XMM0.
+      this.code.movdXmm(XMM0, RAX);
+      this.numberToTaggedArgs();
+      this.runtime("_number_of_ref");
+      return;
     }
     // A dynamic value is a handle: the runtime's double. A text and a number
     // written where one is expected are boxed into handles, and a handle read
