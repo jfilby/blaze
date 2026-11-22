@@ -2416,7 +2416,10 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
         return (fieldOf(b, "statements") as readonly SemanticStatement[]).some((s) => s.k === "storeField" && String(fieldOf(fieldOf(s, "object"), "name")).startsWith("__box_"));
       };
       const boxedAnswer = last?.k === "if" && (writesBox(fieldOf(last, "then") as SemanticBlock) || writesBox(fieldOf(last, "otherwise") as SemanticBlock));
-      if (last?.k !== "call" && !boxedAnswer && !endsByLeaving(block)) {
+      // A lifted arrow's early returns hand back nothing even where its source
+      // inferred a value from its last expression.
+      const lifted = String(fieldOf(fn, "symbol")).startsWith("__closure_");
+      if (last?.k !== "call" && !boxedAnswer && !lifted && !endsByLeaving(block)) {
         problems.push(`${where}the body returns nothing and is declared to return a ${typeText(returns)}`);
       }
       continue;
