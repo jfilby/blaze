@@ -57,9 +57,11 @@ export function servesHttp(source: string): boolean {
  * The language a source is checked against: the command that runs it and the
  * flags it is run with.
  *
- * The flags are the toolchain's, not the source's: a TypeScript source is run
- * by node with the flags node needs to run TypeScript at all, and a Python
- * source is run by python3 with none.
+ * The flags are the toolchain's, not the source's: node runs TypeScript
+ * directly (type stripping is on by default), so a TypeScript source needs no
+ * flags and a Python source is run by python3 with none. Older nodes needed
+ * `--experimental-transform-types` to run TypeScript; node has removed that
+ * flag, and asking for it now stops the source before it runs.
  */
 const TOOLCHAIN_NAMES: readonly string[] = ["typescript", "ts", "python", "py"];
 
@@ -67,9 +69,9 @@ function toolchainRecord(command: string, flags: string[]): { command: string; f
   return { command, flags };
 }
 
-function toolchainFor(language: string): { command: string; flags: string[] } | undefined {
+export function toolchainFor(language: string): { command: string; flags: string[] } | undefined {
   if (language === "typescript" || language === "ts") {
-    return toolchainRecord("node", ["--experimental-transform-types"]);
+    return toolchainRecord("node", []);
   }
   if (language === "python" || language === "py") return toolchainRecord("python3", []);
   return undefined;

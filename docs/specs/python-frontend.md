@@ -475,7 +475,7 @@ two (`toolchain/verify-program.ts:153`).
 **The toolchain of a Python source is `python3`.** The table that holds the
 toolchain of a language (`toolchain/verify-program.ts:27`) becomes a table of
 a command and the flags in front of the source, because the flags are the
-toolchain's: `--experimental-transform-types` is node's, and a Python source
+toolchain's: node runs TypeScript directly, with no flags, and a Python source
 is run with none.
 
 **A Python source needs no prelude.** The TypeScript source is run with a

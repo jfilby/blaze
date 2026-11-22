@@ -102,7 +102,7 @@ async function sourceOutput(files: Record<string, string>, entryFile: string): P
     if (folder !== "") await mkdir(join(directory, folder), { recursive: true });
     await writeFile(join(directory, name), source, "utf8");
   }
-  const result = run(process.execPath, ["--experimental-transform-types", join(directory, entryFile)], {
+  const result = run(process.execPath, [join(directory, entryFile)], {
     cwd: directory,
     timeoutMs: 60_000,
   });
@@ -466,7 +466,7 @@ test("a build of a program delivers one module and one host, and the program pri
   const module = outcome.outputPath;
   assert.ok(module !== null, "a program build delivers its module");
   assert.match(module, /\.wasm$/);
-  const original = run("node", ["--experimental-transform-types", join(directory, "main.ts")], {
+  const original = run("node", [join(directory, "main.ts")], {
     cwd: directory,
     timeoutMs: 60_000,
   });
@@ -511,7 +511,7 @@ test("a test of what a value holds names the kind the host parsed, and narrows",
   );
   const module = outcome.outputPath;
   assert.ok(module !== null, "a program build delivers its module");
-  const original = run("node", ["--experimental-transform-types", join(directory, "main.ts")], {
+  const original = run("node", [join(directory, "main.ts")], {
     cwd: directory,
     timeoutMs: 60_000,
   });
