@@ -47,9 +47,14 @@ function delivered(compiler: string[]): string {
 }
 
 function build(compiler: string[]): void {
+  // A recompile reviews every one of the compiler's ~7700 functions from the
+  // semantic IR before any code is generated. That is a CPU-bound pass over the
+  // whole module graph and takes around ninety minutes, so the old half-hour
+  // limit killed a build that was still making progress rather than one that
+  // had failed.
   const result = run(compiler[0] as string, [...compiler.slice(1), "build", project, "--recompile", "--verify", "none"], {
     cwd: root,
-    timeoutMs: 30 * 60 * 1000,
+    timeoutMs: 3 * 60 * 60 * 1000,
   });
   assert.equal(result.code, 0, `${compiler.join(" ")} failed:\n${result.stderr}\n${result.stdout}`);
 }
