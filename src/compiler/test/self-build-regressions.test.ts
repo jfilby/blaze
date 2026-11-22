@@ -894,3 +894,25 @@ test("a deep copy of a list of untyped values validates", () => {
   const { fn, contract } = resolved(source, "demo");
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "a list is a value the deep copy takes");
 });
+
+test("a void callback's concise body runs a value-returning call", () => {
+  // The compiler's own frontend hands `(name) => called.add(name)` to a walk
+  // that takes a void callback. The arrow is void, but the call its concise
+  // body answers is the dictionary's f64. The lowering used to hand that value
+  // back and the validator refused a void body with a return value; the call
+  // has to run for what it does instead.
+  const source = [
+    "function each(f: (n: number) => void): void { f(1); }",
+    "export function demo(): void {",
+    "  const nums = new Map<number, number>();",
+    "  each((n) => nums.set(n, 1));",
+    "}",
+    "main();",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "1.ts": `${source}\n` }, "1.ts");
+  const lifted = Object.entries(semanticsOf(phase)).find(([name]) => name.startsWith("__closure_"));
+  assert.ok(lifted !== undefined, "the concise arrow was lifted");
+  const [name, fn] = lifted as [string, ReturnType<typeof semanticsOf>[string]];
+  const contract = phase.program.files[0].functions[name];
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the void arrow returns nothing");
+});

@@ -892,11 +892,14 @@ class FunctionBody {
         if (answerType.kind === "primitive" && answerType.name === "f64" && isWideType(value.type)) {
           value = fieldOfValue(this.runtimeCall("Number", [value], F64), "value") as SemanticValue;
         }
-        // A concise body that answers a call returning nothing — `() => f()`
-        // where `f` is a void function — runs the call for what it does and
-        // hands back nothing: a function declared to return nothing cannot
-        // hand back a value, even one of no width.
-        if (String(fieldOfValue(fieldOfValue(this.returns, "type"), "kind")) === "void" && String(fieldOfValue(fieldOfValue(value, "type"), "kind")) === "void") {
+        // A function declared to return nothing cannot hand back a value,
+        // whatever type the value it was written with has. A concise arrow
+        // passed where a void callback is expected keeps the value its body
+        // answers — `(name) => called.add(name)` answers the dictionary's f64 —
+        // even though the arrow itself is void. Run that value for what it does
+        // and hand back nothing. Any side effects of a value that is not a call
+        // are already written by `typed` above.
+        if (String(fieldOfValue(fieldOfValue(this.returns, "type"), "kind")) === "void") {
           if (String(fieldOfValue(value, "k")) === "call") this.write({ k: "call", call: fieldOfValue(value, "call") as SemanticCall, line: Number(fieldOfValue(statement, "line")) });
           this.flush();
           this.finallysWritten();
