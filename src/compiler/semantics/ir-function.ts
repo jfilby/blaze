@@ -2920,7 +2920,11 @@ class FunctionBody {
     // A numeric operator on a dynamic value reads the number the runtime holds
     // in it, so a negation or a complement of an unshaped operand is a number
     // operation rather than one over references.
+    if (op === "-" || op === "~") operandValue = this.asNumber(operandValue);
     let type = numberAt(operandInferred) ?? numeric(operandInferred, operandInferred);
+    // JavaScript's `~` coerces its operand to a 32-bit whole: a complement is
+    // a bitwise operation, which a double has no instruction for.
+    if (op === "~" && type.kind === "primitive" && type.name === "f64") type = { kind: "primitive", name: "i32" };
     if (!isNumber(type)) type = F64;
     // An unsigned wide number has no value below zero: the negated answer is
     // the signed wide carrier's two's complement, which is the host whole the
