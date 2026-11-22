@@ -10741,6 +10741,16 @@ class TypeScriptParser {
     // `a.push(x)` answers the array the name holds afterwards, so written on
     // its own line it is the write that keeps it.
     if (value.k === "append") return this.appendWrite(value, fieldOf(token, "line"));
+    // A truth a runtime call answers is written as a comparison with one so a
+    // body can ask it (`seen.delete(k) === 1`). Written on its own line the
+    // comparison says nothing, but the call it compares is the effect: keep
+    // the call so the statement still runs it.
+    if (
+      value.k === "binary" && value.op === "===" && value.left.k === "call" &&
+      value.right.k === "literal" && String(value.right.text) === "1"
+    ) {
+      return { kind: "expression", value: value.left, line: (fieldOf(token, "line") as number) };
+    }
     return { kind: "expression", value, line: (fieldOf(token, "line") as number) };
   }
 
