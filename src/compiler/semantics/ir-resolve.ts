@@ -305,6 +305,8 @@ type DraftTextPart = { k: "text"; value: string } | { k: "value"; value: DraftVa
 
 /** A value the program does, before it is written down as the IR states it. */
 type DraftValue =
+  /** A first-class reference to a runtime cell a module-level number lives in. */
+  | { k: "global"; id: string; slot: number | null }
   /** A number literal, of the type it is used at. */
   | { k: "literal"; held: NumberHeld }
   /** A typed array literal, of the element type it is used at. */
@@ -796,6 +798,7 @@ function holdsText(value: DraftValue): boolean {
     case "field":
     case "function":
     case "object":
+    case "global":
       return false;
   }
 }
@@ -803,6 +806,8 @@ function holdsText(value: DraftValue): boolean {
 /** The type a resolved value has, or null when it is a string. */
 function draftType(value: DraftValue): TypeExpr | null {
   switch (value.k) {
+    case "global":
+      return { kind: "primitive", name: "f64" };
     case "literal":
       return fieldOf(fieldOf(value, "held"), "type") === null ? null : { kind: "primitive", name: String(fieldOf(fieldOf(value, "held"), "type")) as PrimitiveTypeName };
     case "sized":
@@ -3462,6 +3467,8 @@ class ProgramResolver {
       );
     }
     switch (value.k) {
+      case "global":
+        return { k: "global", id: value.id, slot: value.slot ?? null };
       case "number": {
         const held: NumberHeld = { kind: "number", name: "", mutable: false, type: null, text: value.text };
         if (expect !== null && primitive(expect) !== null) this.expectNumber(expect, held, line);
@@ -5448,6 +5455,7 @@ interface BlockFrame {
  */
 function draftHasCall(value: DraftValue): boolean {
   switch (value.k) {
+    case "global":
     case "call":
     case "fixed":
     case "fill":
@@ -6374,6 +6382,8 @@ class ProgramLowering {
 
   private value(value: DraftValue, as: TypeExpr | null, line: number): SemanticValue {
     switch (value.k) {
+      case "global":
+        return { k: "global", type: F64, id: value.id, slot: value.slot };
       case "literal": {
         // A number no use has fixed is a double, as it is in the language it
         // was written in; a use that fixed it is the one that names it.

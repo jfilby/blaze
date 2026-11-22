@@ -1184,6 +1184,13 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // the kind, and answers one for the array it holds and nothing otherwise.
       case "blaze_rt_is_array":
         return `${RUNTIME_NAME}_is_array(blaze_value_from_dynamic(${argument(0)}))`;
+      // A module-level number lives in a cell the runtime holds. The program
+      // body writes the cell a function reads, so both forms cross the same
+      // tagged-value boundary the module-function lowering uses.
+      case "blaze_rt_global_get":
+        return `blaze_number_of_value(blaze_rt_global_get(${argument(0)}))`;
+      case "blaze_rt_global_set":
+        return `blaze_number_of_value(blaze_rt_global_set(${argument(0)}, blaze_value_number(${argument(1)})))`;
       case "JSON.stringify": {
         // An object literal is serialized where it is written: the field names
         // are the source's and the values are rendered as text one by one, so no

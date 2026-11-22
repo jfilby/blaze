@@ -91,6 +91,8 @@ export interface DeclaredFunction {
 export type ProgramValue =
   /** A number, exactly as the source wrote it. */
   | { k: "number"; text: string }
+  /** A first-class reference to a cell the runtime holds for a module-level number. */
+  | { k: "global"; id: string; slot?: number | null }
   /**
    * A whole number, which is the `i64` a whole number is. The name is the one
    * the program model has always used, and it was a TypeScript spelling that

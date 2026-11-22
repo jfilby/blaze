@@ -278,6 +278,8 @@ class ProgramParser {
   private readonly path: string;
   private readonly diagnostics: Diagnostics;
   private position = 0;
+  /** Nesting of `{ ... }` at the cursor: a module-level value is one at zero. */
+  private braceDepth = 0;
   /** Set when the construct read was reported, so it is not reported twice. */
   private refused = false;
   /** How many refusals the statement being read has written. */
@@ -338,12 +340,15 @@ class ProgramParser {
   /** The class whose method is being read, or null in the program body. */
   private currentClass: ClassInfo | null = null;
 
-  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable, imported: ReadonlySet<string> = new Set()) {
+  private readonly numericGlobals: ReadonlyMap<string, string>;
+
+  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable, imported: ReadonlySet<string> = new Set(), numericGlobals: ReadonlyMap<string, string> = new Map()) {
     this.tokens = tokens;
     this.path = path;
     this.diagnostics = diagnostics;
     this.classTable = classTable ?? scanClasses(tokens);
     this.importedNames = imported;
+    this.numericGlobals = numericGlobals;
   }
 
   private peek(offset = 0): Token {
@@ -864,6 +869,7 @@ class ProgramParser {
   /** The statements between two braces, up to the closing one. */
   private braces(): ProgramStatement[] {
     this.expect("{");
+    this.braceDepth += 1;
     const body: ProgramStatement[] = [];
     while (this.peek().kind !== "end" && !this.at("}")) {
       const statement = this.guardedStatement();
@@ -872,6 +878,7 @@ class ProgramParser {
       this.accept(";");
     }
     this.expect("}");
+    this.braceDepth -= 1;
     body.push(...this.drainPending());
     return body;
   }
@@ -966,6 +973,19 @@ class ProgramParser {
     const collection = this.collectionValues.get(value);
     if (collection === undefined) this.collections.delete(name);
     else this.collections.set(name, collection);
+    // A module-level number a compiled function reads is a cell the runtime
+    // holds, not a name the program body owns. Write the same value into that
+    // cell so the function's read answers what the source wrote. The local
+    // declaration stays for reads the body itself makes.
+    const global = this.braceDepth === 0 ? this.numericGlobals.get(name) : undefined;
+    if (global !== undefined) {
+      this.pending.push({
+        kind: "invoke",
+        function: "blaze_rt_global_set",
+        args: [{ k: "global", id: global }, value],
+        line,
+      });
+    }
     return { kind: "declare", name, mutable: keyword !== "const", type, value, line };
   }
 
@@ -3258,6 +3278,7 @@ export function parseProgramBody(
   diagnostics: Diagnostics,
   classes?: ClassTable,
   imported: ReadonlySet<string> = new Set(),
+  numericGlobals: ReadonlyMap<string, string> = new Map(),
 ): ProgramStatement[] {
-  return new ProgramParser(tokens, path, diagnostics, classes, imported).body();
+  return new ProgramParser(tokens, path, diagnostics, classes, imported, numericGlobals).body();
 }

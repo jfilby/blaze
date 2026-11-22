@@ -6937,7 +6937,7 @@ class TypeScriptParser {
       if (fieldOf(declaration, "program") === true && runs) continue;
       for (const entry of fieldOf(declaration, "refusal") as { message: string; detail: string; line: number }[]) this.diagnostics.report(String(fieldOf(entry, "message")), String(fieldOf(entry, "detail")), Number(fieldOf(entry, "line")));
     }
-    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable, this.importedTypeNames) : [];
+    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable, this.importedTypeNames, this.numericGlobals) : [];
     // `export { f }` may name a function the file declared after it, so the
     // names are applied once the whole file has been read. A name no
     // declaration answers is refused here, where every other export is.
@@ -26333,7 +26333,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     const fromStatements = tokensAfterImports(parser["tokens"]);
     const programDiagnostics = new Diagnostics();
     try {
-      const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens));
+      const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens), parser["numericGlobals"]);
       if (programDiagnostics.entries.length === 0) {
         // The class functions were lowered from declarations the program
         // parser never sees, so they travel with the body: they are the

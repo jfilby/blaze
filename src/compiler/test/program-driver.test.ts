@@ -22,6 +22,10 @@ import { diagnostic, phaseOf } from "./phase.ts";
 import { semanticIrProblems } from "../semantics/ir-validate.ts";
 import { parseSemanticProgram } from "../semantics/ir-text.ts";
 import { scratch } from "./scratch.ts";
+import { writeProject } from "./project.ts";
+import { runBuild } from "../compiler.ts";
+
+const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
 
 /** The object the driver of every program here links against, built once. */
 let runtime: Promise<string> | null = null;
@@ -522,11 +526,24 @@ test("a captured name is passed from the binding it was captured from", async ()
     "}",
     "",
   ].join("\n");
-  const { binary, original } = await deliver(source);
-  assert.equal(original, "12\n12\n", "the source answers the same at both call sites");
-  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  // A function that reads a module-level number is a function of the module,
+  // so it is lowered into an object the driver links rather than a body the
+  // driver writes. Build the whole program instead of driving it alone.
+  const directory = await scratch("blaze-capture-");
+  await writeFile(join(directory, "main.ts"), source, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "machine",
+  });
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, model: `replay:${REPLAY}` }, () => {}, "build");
+  assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(original.stdout, "12\n12\n", "the source answers the same at both call sites");
+  const delivered = run(outcome.outputPath, [], { timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, delivered.stderr);
-  assert.equal(delivered.stdout, original);
+  assert.equal(delivered.stdout, original.stdout);
 });
 
 test("a function declared beside the name its own block shadows is refused", () => {
