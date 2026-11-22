@@ -224,6 +224,7 @@ test("a rest function type is called at the arity the source wrote", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
   const fn = read.analysis.functions.find((one) => one.name === "demo");
   const handle = fn?.handle as { body?: unknown } | undefined;
+  const invokes: { args: unknown[]; params: unknown[] }[] = [];
   const arityOf = (value: unknown): void => {
     if (Array.isArray(value)) {
       for (const one of value) arityOf(one);
@@ -232,12 +233,16 @@ test("a rest function type is called at the arity the source wrote", () => {
     if (value === null || typeof value !== "object") return;
     const call = value as { k?: string; args?: unknown[]; params?: unknown[] };
     if (call.k === "invoke" && call.args !== undefined) {
-      assert.equal(call.params?.length, call.args.length, "the invoke states one type per argument");
-      assert.equal(call.args.length, 6, "six arguments were written");
+      invokes.push({ args: call.args, params: call.params ?? [] });
     }
     for (const one of Object.values(value)) arityOf(one);
   };
   arityOf(handle?.body ?? []);
+  assert.equal(invokes.length, 1, "the call is through the function value");
+  for (const invoke of invokes) {
+    assert.equal(invoke.params.length, invoke.args.length, "the invoke states one type per argument");
+    assert.equal(invoke.args.length, 6, "six arguments were written");
+  }
 });
 
 test("a text and a reference pass to a dynamic number parameter", () => {
@@ -539,6 +544,7 @@ test("a recursive arrow passed to some reads through an array test", () => {
   ].join("\n");
   const read = readTypeScriptModule(source, "module.ts", false);
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  assert.ok(read.analysis.functions.length > 0, "the walker and its arrow are read as functions");
   for (const fn of read.analysis.functions) {
     const handle = fn.handle as { body?: unknown } | undefined;
     assert.doesNotMatch(JSON.stringify(handle?.body ?? []), /__refused_/, `${fn.name} has no hole`);
@@ -821,13 +827,23 @@ test("an untyped field read is a number when it is added", () => {
 });
 
 test("BigInt of a number passed to a machine word is that number", () => {
+  // A `bigint` parameter is the machine word a compiled function reads, so the
+  // call reaches the IR: the wide carrier `BigInt(count)` built only for the
+  // source's type is the number it was built from.
   const source = [
-    "declare function move(register: number, value: bigint): void;",
-    "export function demo(count: number): void { move(0, BigInt(count)); }",
-    "main();",
+    "function move(register: number, value: bigint): number { return register; }",
+    "export function demo(count: number): number { return move(0, BigInt(count)); }",
+    "",
   ].join("\n");
-  const read = readTypeScriptModule(source, "module.ts", false);
-  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the call resolves");
+  const ir = printSemanticFunction(fn);
+  assert.match(
+    ir,
+    /call\[f64\] move \[arg\[f64\] const\[f64\] 0 arg\[i64\] local\[f64\] count\]/,
+    "the argument is the number, not its wide carrier",
+  );
+  assert.doesNotMatch(ir, /BigInt/, "no wide value is built for the machine word");
 });
 
 test("a dynamic loop bound rounds at a number, not a reference", () => {

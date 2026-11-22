@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { isInteger, isWhole, limbsOf, wholeOf } from "../core/semantic-ir.ts";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
+import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { programWithSemantics } from "./phase.ts";
 import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
@@ -174,31 +175,50 @@ test("a signed wide number may be negated and complemented", () => {
   );
   assert.deepEqual(semanticFunctionProblems(semantics["f"]), []);
   assert.deepEqual(semanticFunctionProblems(semantics["g"]), []);
-  // An unsigned wide number still refuses both.
-  const { semantics: refused } = programWithSemantics(
+  // An unsigned wide number has no negative magnitude, so `-a` is written as
+  // the two's complement the subtraction from zero makes. `~a` still has no
+  // answer: a complement is a number below zero an unsigned wide cannot hold.
+  const { semantics: wide } = programWithSemantics(
     "typescript",
-    { "main.ts": ["function h(a: u256): u256 {", "  return -a;", "}", "console.log(h(1n));", ""].join("\n") },
+    {
+      "main.ts": [
+        "function neg(a: u256): u256 { return -a; }",
+        "function not(a: u256): u256 { return ~a; }",
+        "console.log(neg(1n));",
+        "console.log(not(2n));",
+        "",
+      ].join("\n"),
+    },
     "main.ts",
   );
-  assert.equal(semanticFunctionProblems(refused["h"]).length, 1);
+  assert.deepEqual(semanticFunctionProblems(wide["neg"]), []);
+  assert.match(
+    printSemanticFunction(wide["neg"]),
+    /sub\[u256\] const\[u256\] 0 local\[u256\] a/,
+    "the negation is a subtraction from zero",
+  );
+  const notProblems = semanticFunctionProblems(wide["not"]);
+  assert.equal(notProblems.length, 1);
+  assert.match(notProblems[0]!, /bitNot of a u256/, "the complement is still refused");
 });
 
-test("an i256 is computed only with another i256", () => {
-  // A machine word beside an i256 has no form the kernel answers.
-  const cases: [string, string, RegExp][] = [
-    ["add", "function f(a: i256, b: bigint): i256 { return a + b; }", /kernel every backend answers a wide number with is over two of them/],
-    ["cmp", "function f(a: i256, b: number): boolean { return a > b; }", /a wide number is not a machine word/],
+test("a machine word beside an i256 widens into its low limb", () => {
+  // A machine word beside an i256 has no kernel of its own, but the widening a
+  // wide slot makes from it also serves an operand: the word is the low limb
+  // and the high limb is zero.
+  const cases: [string, string, string][] = [
+    ["add", "function f(a: i256, b: bigint): i256 { return a + b; }", "console.log(f(1n, 2n));"],
+    ["cmp", "function f(a: i256, b: number): boolean { return a > b; }", "console.log(f(1n, 2));"],
   ];
-  for (const [what, source, said] of cases) {
+  for (const [what, source, call] of cases) {
     const { semantics } = programWithSemantics(
       "typescript",
-      { "main.ts": [source, "console.log(f(1n, 2n));", ""].join("\n") },
+      { "main.ts": [source, call, ""].join("\n") },
       "main.ts",
     );
     const fn = semantics["f"];
-    const problems = semanticFunctionProblems(fn);
-    assert.equal(problems.length, 1, `${what} of an i256 and a machine word: ${problems.join("; ")}`);
-    assert.match(problems[0]!, said, what);
+    assert.deepEqual(semanticFunctionProblems(fn), [], `${what} of an i256 and a machine word resolves`);
+    assert.match(printSemanticFunction(fn), /u256_from_u64x2/, `${what} widens the machine word`);
   }
 });
 
