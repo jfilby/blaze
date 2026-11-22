@@ -8,7 +8,7 @@
     "blaze": "cli.ts"
   },
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26"
   },
   "scripts": {
     "aic": "node cli.ts",

@@ -9,7 +9,7 @@ npm install
 npm link          # optional: puts `blaze` on your PATH
 ```
 
-The link is a symlink to cli.ts, so the node on your PATH must be the >= 22.18
+The link is a symlink to cli.ts, so the node on your PATH must be the >= 26
 one.
 
 Verify the install with `blaze --help`.

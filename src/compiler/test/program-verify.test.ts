@@ -13,7 +13,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { servesHttp, verifyProgram } from "../toolchain/verify-program.ts";
+import { run } from "../core/process.ts";
+import { servesHttp, toolchainFor, verifyProgram } from "../toolchain/verify-program.ts";
 import { scratch } from "./scratch.ts";
 
 const SOURCE = [
@@ -51,6 +52,25 @@ test("a comment or a string that names HTTP is not a program that serves it", ()
   // gets.
   assert.equal(servesHttp('const body = fetch("https://example.com/", "GET", "", "");\n'), true);
   assert.equal(servesHttp('fetch(url, "GET", "", "");\n'), true);
+});
+
+test("the node toolchain asks for flags node still accepts", async () => {
+  const toolchain = toolchainFor("typescript");
+  assert.ok(toolchain !== undefined, "typescript has a toolchain");
+  assert.equal(toolchain.command, "node");
+  // Node removed `--experimental-transform-types`; a source launched with it
+  // stops before it runs, so the toolchain must not ask for it.
+  assert.ok(!toolchain.flags.includes("--experimental-transform-types"));
+
+  const directory = await scratch("blaze-toolchain-flags-");
+  const path = join(directory, "main.ts");
+  await writeFile(path, "const answer: number = 42;\nconsole.log(answer);\n", "utf8");
+  const result = run(process.execPath, [...toolchain.flags, path], {
+    cwd: directory,
+    timeoutMs: 60_000,
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "42\n");
 });
 
 test("a program that prints what its source prints is the program the source is", async () => {
