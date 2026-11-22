@@ -1042,6 +1042,7 @@ test("a power is a floating value, whatever the operands are", async () => {
 
 const U256: SemanticType = { kind: "primitive", name: "u256" };
 const U64C: SemanticType = { kind: "primitive", name: "u64" };
+const I64C: SemanticType = { kind: "primitive", name: "i64" };
 const WIDE_PRIME = 115792089237316195423570985008687907853269984665640564039457584007908834671663n;
 
 /** A wide number built from its four limbs. */
@@ -1073,6 +1074,31 @@ function modularCall(callee: string, left: SemanticValue, right: SemanticValue, 
     },
   };
 }
+
+/** Reading the low limb of a wide number, as a narrow use does. */
+function lowOf(value: SemanticValue): SemanticValue {
+  return {
+    k: "call", type: I64C,
+    call: {
+      callee: "u256_low", builtin: true,
+      signature: { name: "u256_low", symbol: "u256_low", params: [{ name: "value", type: "u256" }], returns: "i64" },
+      args: [value], argTypes: [U256], returns: I64C,
+      effects: [], ownership: "none", retain: false,
+    },
+  };
+}
+
+test("the low limb of a wide number is the machine word a narrow use reads", async () => {
+  // The frontend narrows a wide value to its low limb where a machine-word
+  // field or a bitwise complement takes it. The C backend has to write that
+  // read too: it is the limb of the four the runtime laid out, not a double.
+  const wide = 0xfedcba9876543210_0123456789abcdefn;
+  const fn = subject(I64C, handsBack(lowOf(wideOf(wide))));
+  const driver = (name: string): string =>
+    `printf("%lld", (long long)${name}());`;
+  assert.equal(await lowered(fn, driver), "81985529216486895");
+  assert.match(generateFunctionC(fn), /limbs\[0\]/);
+});
 
 test("a product reduced modulo a wide prime is the kernel the runtime answers", async () => {
   // C has no arithmetic over four limbs, so the modular multiply is the kernel:

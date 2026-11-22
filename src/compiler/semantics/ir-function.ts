@@ -1164,7 +1164,7 @@ class FunctionBody {
     const base = this.read(String(fieldOfValue(statement, "base")), line);
     const written = this.typed(fieldOfValue(statement, "value") as Expression, null, line);
     const writtenInferred = fieldOfValue(written, "inferred") as Inferred;
-    const writtenValue = fieldOfValue(written, "value") as SemanticValue;
+    let writtenValue = fieldOfValue(written, "value") as SemanticValue;
     const baseSlot = fieldOfValue(base, "slot") as SemanticSlot;
     const baseInferred = fieldOfValue(base, "inferred") as Inferred;
     const baseName = String(fieldOfValue(base, "name"));
@@ -1192,6 +1192,16 @@ class FunctionBody {
     // as a number is a number, and a field the body writes but the literal
     // never held is a field of the object.
     if (String(fieldOfValue(baseInferred, "kind")) === "object") this.stored(String(fieldOfValue(baseInferred, "key")), fieldName, writtenInferred);
+    const fieldType = this.fieldType(layout, fieldName, line);
+    // A compound write combines the value with what the field holds, at the
+    // width the field was laid out at. A wide value beside a machine-word
+    // field is read at its low limb, the narrowing the language already makes
+    // when a wide number is written into a narrow slot; the two then share one
+    // width and the backend writes one operation rather than refusing one.
+    if (op !== "=" && isInteger(fieldType) && !isWideType(fieldType) && isWideType(writtenValue.type)) {
+      const low = this.wideKernel("u256_low", [writtenValue]);
+      if (low !== null) writtenValue = low;
+    }
     this.write({
       k: "storeField",
       object,
@@ -1202,9 +1212,9 @@ class FunctionBody {
           ? writtenValue
           : {
               k: "arith",
-              type: this.fieldType(layout, fieldName, line),
+              type: fieldType,
               op: COMPOUND[op as keyof typeof COMPOUND],
-              left: { k: "loadField", type: this.fieldType(layout, fieldName, line), object, layout, field: fieldName },
+              left: { k: "loadField", type: fieldType, object, layout, field: fieldName },
               right: writtenValue,
             },
       line,
@@ -2936,7 +2946,20 @@ class FunctionBody {
     // in it, so a negation or a complement of an unshaped operand is a number
     // operation rather than one over references.
     if (op === "-" || op === "~") operandValue = this.asNumber(operandValue);
-    let type = numberAt(operandInferred) ?? numeric(operandInferred, operandInferred);
+    // A complement of an unsigned wide number would be below zero, which a
+    // u256 has no spelling for. Where the wide value is read into a machine
+    // word the low limb is the value, so complement that limb instead: this is
+    // the same narrowing a wide value already makes when it is written into an
+    // i64 field, and it keeps a bitset's mask a machine word.
+    let narrowedComplement = false;
+    if (op === "~" && isWideType(operandValue.type)) {
+      const low = this.wideKernel("u256_low", [operandValue]);
+      if (low !== null) {
+        operandValue = low;
+        narrowedComplement = true;
+      }
+    }
+    let type = narrowedComplement ? I64 : numberAt(operandInferred) ?? numeric(operandInferred, operandInferred);
     // JavaScript's `~` coerces its operand to a 32-bit whole: a complement is
     // a bitwise operation, which a double has no instruction for.
     if (op === "~" && type.kind === "primitive" && type.name === "f64") type = { kind: "primitive", name: "i32" };

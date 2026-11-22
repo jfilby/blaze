@@ -916,6 +916,28 @@ test("a union's shape does not type a numeric field read as the union", () => {
   assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the decision holds a number");
 });
 
+test("a wide value beside a machine-word field reads as its low limb", () => {
+  // The bitset utility shifts a wide whole and writes it into a `bigint` field
+  // the file laid out at a machine word, and complements the wide mask before
+  // an `&=`. The wide value is read at its low limb in both, the same narrowing
+  // a wide number already makes when it is written into a narrow slot.
+  const source = [
+    "class Bits {",
+    "  private bits: bigint = 0n;",
+    "  add(n: number): void { this.bits |= 1n << BigInt(n); }",
+    "  remove(n: number): void { this.bits &= ~(1n << BigInt(n)); }",
+    "}",
+    "main();",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "1.ts": source }, "1.ts");
+  for (const name of ["Bits_add", "Bits_remove"]) {
+    const fn = semanticsOf(phase)[name];
+    const contract = phase.program.files[0].functions[name];
+    assert.ok(fn !== undefined, `${name} is resolved`);
+    assert.deepEqual(semanticFunctionProblems(fn, contract), [], `${name} writes one machine word`);
+  }
+});
+
 test("a void callback's concise body runs a value-returning call", () => {
   // The compiler's own frontend hands `(name) => called.add(name)` to a walk
   // that takes a void callback. The arrow is void, but the call its concise
