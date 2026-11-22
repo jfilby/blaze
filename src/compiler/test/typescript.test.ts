@@ -373,7 +373,7 @@ test("every construct outside the subset is reported at once", () => {
       "typescript",
       [
         "export function spin(x: number): number {",
-        "  yield x;",
+        "  async x;",
         "  return 0;",
         "}",
         "export function odd(x: Date): number {",
@@ -389,7 +389,7 @@ test("every construct outside the subset is reported at once", () => {
   );
 
   assert.match(message, /2 constructs of module\.ts are outside the subset the compiler reads/);
-  assert.match(message, /line 2: "yield" is not supported/);
+  assert.match(message, /line 2: "async" is not supported/);
   assert.match(message, /line 9: "class" is not supported/);
 });
 
@@ -705,19 +705,18 @@ test("a program body reads an object spread, conditional or not", () => {
 });
 
 test("a missing closing bracket ends its own construct, not the rest of the line", () => {
-  // `if ("a" in x)` writes a condition the expression grammar does not carry.
-  // The `)` is missing where the header expected it, and reading on to the one
-  // the source wrote ends the header there: without it the body and the `in`
-  // were read as statements of their own.
+  // The condition is one the grammar carries, but the `)` is missing where the
+  // header expected it, and reading on to the one the source wrote ends the
+  // header there: without it the body was read as a statement of its own.
   const message = diagnostic(() =>
     programOf(
       "typescript",
-      { "main.ts": ['const x = 1;', 'if ("a" in x) console.log(1);', 'console.log(2);'].join("\n") },
+      { "main.ts": ['const x = 1;', 'if ("a" > x console.log(1);', 'console.log(2);'].join("\n") },
       "main.ts",
     ),
   );
 
-  assert.match(message, /1 construct of main\.ts is outside the subset the compiler reads/);
+  assert.match(message, /2 constructs of main\.ts are outside the subset the compiler reads/);
   assert.match(message, /line 2: expected "\)"/);
 });
 
@@ -1626,11 +1625,11 @@ test("a quote an escape covers does not end the string", () => {
   // statement. The construct after it is refused on the line it is written on.
   const message = diagnostic(() =>
     typescript.analyze(
-      'export function f(x: number): number {\n  const s = "a\\"b";\n  yield x;\n  return x;\n}\n',
+      'export function f(x: number): number {\n  const s = "a\\"b";\n  async x;\n  return x;\n}\n',
       "main.ts",
     ),
   );
-  assert.match(message, /line 3: "yield" is not supported/);
+  assert.match(message, /line 3: "async" is not supported/);
   assert.doesNotMatch(message, /line 2/);
 });
 
@@ -1640,11 +1639,11 @@ test("a string that spans lines moves the line every later diagnostic names", ()
   // three lines short of where the user wrote it.
   const message = diagnostic(() =>
     typescript.analyze(
-      "export function g(x: number): number {\n  console.log(`\nreport\nhere\n`);\n  yield x;\n  return x;\n}\n",
+      "export function g(x: number): number {\n  console.log(`\nreport\nhere\n`);\n  async x;\n  return x;\n}\n",
       "main.ts",
     ),
   );
-  assert.match(message, /line 6: "yield" is not supported/);
+  assert.match(message, /line 6: "async" is not supported/);
 });
 
 test("an interpolation ends at the brace that closes it, not the first one", () => {
