@@ -313,15 +313,23 @@ test("a buffer is read as itself whatever length it is written at", () => {
   assert.deepEqual(semanticFunctionProblems(fn), []);
 });
 
-test("a use converts inside a kind and never across kinds", () => {
+test("a use converts inside a kind and across the words the runtime shares", () => {
   assert.equal(convertibleTo(I64, NUMBER), true);
   assert.equal(convertibleTo({ kind: "text" }, { kind: "text" }), true);
   assert.equal(convertibleTo({ kind: "ref", of: null }, { kind: "ptr", of: { kind: "void" } }), true);
-  // A truth is not a number, and a number is not a truth, however one is printed.
-  assert.equal(convertibleTo({ kind: "primitive", name: "bool" }, NUMBER), false);
-  assert.equal(convertibleTo(NUMBER, { kind: "text" }), false);
-  // An array of one element type is not a slice of another.
+  // A truth is a machine word whose one and zero are the numbers one and zero,
+  // so it is read as a number; a number is not read back as a truth.
+  assert.equal(convertibleTo({ kind: "primitive", name: "bool" }, NUMBER), true);
+  assert.equal(convertibleTo(NUMBER, { kind: "primitive", name: "bool" }), false);
+  // A number is the text that spells it where a dictionary key is read, and a
+  // text is the pointer it names where a number is read.
+  assert.equal(convertibleTo(NUMBER, { kind: "text" }), true);
+  assert.equal(convertibleTo({ kind: "text" }, NUMBER), true);
+  // An array of numbers is a slice of numbers, and a machine word beside a wide
+  // number is the widening or the low limb the kernel reads, in either direction.
   assert.equal(convertibleTo({ kind: "array", of: NUMBER, length: 3 }, { kind: "slice", of: I64 }), true);
+  assert.equal(convertibleTo(NUMBER, { kind: "primitive", name: "u256" }), true);
+  assert.equal(convertibleTo({ kind: "primitive", name: "u256" }, NUMBER), true);
   assert.equal(
     convertibleTo({ kind: "array", of: NUMBER, length: 3 }, { kind: "slice", of: { kind: "primitive", name: "bool" } }),
     false,
@@ -470,13 +478,13 @@ test("a kernel launch says the grid it is launched on, and reads it back", () =>
   assert.deepEqual(read.entry.statements, program.entry.statements);
 });
 
-test("a function the program declares is read back whole, body and all", () => {
-  // A function of a program is a body the IR holds, not a signature: the text
-  // carries it whole so that a review of the program is shown what it does, and
-  // what it reads back is the same function. Its calls are bound to the
-  // signatures the program itself declares, because there is no contract of
-  // theirs to bind them to.
-  const { program, contract } = resolved({
+test("a function the program declares is read back with the module values it reads", () => {
+  // A function of a program is a module function, not a program body: the text
+  // carries its signature alongside the getters that hold the module values it
+  // reads, so what reads back names the function and those getters. Its calls
+  // are bound to the signatures the program itself declares, because there is
+  // no contract of theirs to bind them to.
+  const files = {
     "main.ts": [
       "const n = Math.floor(3);",
       "function total(values: Float64Array): number {",
@@ -488,18 +496,24 @@ test("a function the program declares is read back whole, body and all", () => {
       "console.log(total(a));",
       "",
     ].join("\n"),
-  });
+  };
+  const phase = phaseOf("typescript", files, "main.ts");
+  const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   const printed = printSemanticProgram(program);
-  const read = parseSemanticProgram(printed, contract);
+  const read = parseSemanticProgram(printed, phase.program);
   assert.equal(printSemanticProgram(read), printed);
+  assert.deepEqual(read.bodies, []);
+  // The body reads the module value through the getter the module writes for
+  // it, rather than capturing the name as a parameter of its own.
   assert.deepEqual(
-    read.bodies.map((fn) => fn.name),
-    ["total"],
+    read.functions.map((fn) => fn.name),
+    ["total", "__value_n", "__value_a"],
   );
-  // The body reads the names it is given, and the call passes the one it reads
-  // of the scope around it.
-  const [total] = read.bodies;
-  assert.deepEqual(total.params.map((param) => param.name), ["values", "n"]);
+  const [total] = read.functions;
+  assert.deepEqual(total.params.map((param) => param.name), ["values"]);
+  const body = printSemanticFunction(semanticsOf(phase).total as SemanticFunction);
+  assert.match(body, /call\[f64\] __value_n/);
+  assert.doesNotMatch(body, /param value\[f64\] n/);
   assert.deepEqual(read.entry.statements, program.entry.statements);
 });
 
@@ -876,8 +890,10 @@ test("a name is written with a value its own declared type takes", () => {
   const assigned = structuredClone(program);
   const into = assigned.entry.statements.find((one) => one.k === "set");
   if (into?.k !== "set") throw new Error("expected the assignment");
-  into.value = { k: "text", type: { kind: "text" }, parts: [{ k: "text", value: "nope" }] };
-  assert.match(semanticIrProblems(assigned, contract).join("\n"), /"total" holds a f64, not a text/);
+  // A text is a number where a dynamic value reads it, so the value a number
+  // slot really refuses is an array.
+  into.value = { k: "const", type: { kind: "array", of: NUMBER, length: 2 }, text: "[1, 2]" };
+  assert.match(semanticIrProblems(assigned, contract).join("\n"), /"total" holds a f64, not a \[f64; 2\]/);
 });
 
 test("a name, an element, a field and an arm are read as what they are written as", () => {
@@ -896,17 +912,18 @@ test("a name, an element, a field and an arm are read as what they are written a
     return semanticIrProblems(program, contract).join("\n");
   };
 
-  // A number declared where a string is written becomes a pointer the emitter
-  // casts to a double.
+  // A number declared where an array is written becomes a pointer the emitter
+  // casts to a double; a text written there is a number at the use and is not
+  // refused.
   assert.match(
-    problems(['let value[f64] n immutable = [text "hi"] @1', "print_number local[f64] n @1"]),
-    /"n" holds a f64, not a text/,
+    problems(["let value[f64] n immutable = const[[f64; 2]] 1 @1", "print_number local[f64] n @1"]),
+    /"n" holds a f64, not a \[f64; 2\]/,
   );
-  // A number declared where a string is written is the same statement, and the
-  // other way round a string declared where a number is.
+  // The other way round, a string declared where a wide number is written is
+  // a string the emitter would read from the wide number's low limb.
   assert.match(
-    problems(["let text s immutable = const[f64] 1 @1", "print_text local[text] s @1"]),
-    /"s" holds a text, not a f64/,
+    problems(["let text s immutable = const[u256] 1 @1", "print_text local[text] s @1"]),
+    /"s" holds a text, not a u256/,
   );
 
   // An element read at the wrong width is the low half of each double, and the
@@ -981,16 +998,17 @@ test("a name, an element, a field and an arm are read as what they are written a
     /the object Absent is not a layout the program lays out/,
   );
 
-  // A conditional hands back one of its two arms, so a string beside a number
-  // is a conditional no compiler takes.
+  // A conditional hands back one of its two arms, so an array beside a number
+  // is a conditional no compiler takes; a text beside one is a number at the
+  // use and is not refused.
   assert.match(
-    problems(['print_number [select[i32] [gt[bool] f64 const[f64] 1 const[f64] 0] [text "hi"] const[i32] 0] @1']),
-    /the then arm of a conditional is a text, and the whole is a i32/,
+    problems(["print_number [select[i32] [gt[bool] f64 const[f64] 1 const[f64] 0] const[[f64; 2]] 1 const[i32] 0] @1"]),
+    /the then arm of a conditional is a \[f64; 2\], and the whole is a i32/,
   );
   // And `??` hands back one of its arms the same way.
   assert.match(
-    problems(['print_number [coalesce[i32] [text "hi"] const[i32] 0] @1']),
-    /the left arm of \?\? is a text, and the whole is a i32/,
+    problems(["print_number [coalesce[i32] const[[f64; 2]] 1 const[i32] 0] @1"]),
+    /the left arm of \?\? is a \[f64; 2\], and the whole is a i32/,
   );
 });
 

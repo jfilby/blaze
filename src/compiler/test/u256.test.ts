@@ -18,6 +18,7 @@
 import assert from "node:assert/strict";
 import { isInteger, isWhole, limbsOf, wholeOf } from "../core/semantic-ir.ts";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
+import { printSemanticFunction } from "../semantics/ir-text.ts";
 import { foldSemanticValue } from "../semantics/optimize-ir.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import { test } from "node:test";
@@ -305,31 +306,29 @@ test("a wide number is a whole number and is never narrowed to a machine word", 
   assert.equal(wholeOf("isize", "i32"), "isize");
 });
 
-test("a wide number is only computed with another wide number", () => {
+test("a machine word beside a wide number is widened before the kernel sees it", () => {
   // Every backend answers a wide operation by calling the kernel, and the
-  // kernel is over two `u256`. A narrower operand beside one has no form there:
-  // the C backend wrote a cast from a scalar to a struct, which is a source that
-  // does not compile, and the machine backend asked for the single-register
-  // width a wide number does not have. So each of these is refused at the last
-  // point before a backend is handed the tree, naming what is wrong with it.
+  // kernel is over two `u256`. A narrower operand beside one has a form now: it
+  // is widened into a `u256` with the word in the low limb and zero above it,
+  // so no backend is handed the scalar-to-struct cast or the single-register
+  // width a wide number does not have. Each of these is written as that
+  // widening rather than left for a backend to guess.
   const pairs: [string, readonly string[], RegExp][] = [
-    ["add", ["export function f(a: u256, b: bigint): u256 {", "  return a + b;", "}"], /kernel every backend answers a wide number with is over two of them/],
-    ["mul", ["export function f(a: u256, b: number): u256 {", "  return a * b;", "}"], /kernel every backend answers a wide number with is over two of them/],
-    // A comparison is read as the operand the IR names, and a double beside a
-    // wide number makes the operand the double: which is the demotion this pair
-    // used to be, and the reason it is named rather than left to a backend.
-    ["gt", ["export function f(a: u256, b: number): boolean {", "  return a > b;", "}"], /a wide number is not a machine word/],
-    ["lt", ["export function f(a: number, b: u256): boolean {", "  return a < b;", "}"], /a wide number is not a machine word/],
+    ["add", ["export function f(a: u256, b: bigint): u256 {", "  return a + b;", "}"], /add\[u256\] local\[u256\] a \[call\[u256\] u256_from_u64x2 \[arg\[u64\] local\[i64\] b arg\[u64\] const\[u64\] 0\]/],
+    ["mul", ["export function f(a: u256, b: number): u256 {", "  return a * b;", "}"], /mul\[u256\] local\[u256\] a \[call\[u256\] u256_from_u64x2 \[arg\[u64\] local\[f64\] b arg\[u64\] const\[u64\] 0\]/],
+    // A comparison is read as the operand the IR names, so the double beside a
+    // wide number is widened too rather than demoting the pair to the double.
+    ["gt", ["export function f(a: u256, b: number): boolean {", "  return a > b;", "}"], /gt\[bool\] u256 local\[u256\] a \[call\[u256\] u256_from_u64x2 \[arg\[u64\] local\[f64\] b arg\[u64\] const\[u64\] 0\]/],
+    ["lt", ["export function f(a: number, b: u256): boolean {", "  return a < b;", "}"], /lt\[bool\] u256 \[call\[u256\] u256_from_u64x2 \[arg\[u64\] local\[f64\] a arg\[u64\] const\[u64\] 0\] ownership=none retain=no\] local\[u256\] b/],
     // The other side of the same comparison: here the wide number is on the left
-    // and the operand is the `i64` a whole number is read at, so the kernel is
-    // what is missing rather than the width.
-    ["ge", ["export function f(a: u256, b: bigint): boolean {", "  return a >= b;", "}"], /kernel every backend answers a wide number with is over two of them/],
+    // and the operand is the `i64` a whole number is read at, widened the same way.
+    ["ge", ["export function f(a: u256, b: bigint): boolean {", "  return a >= b;", "}"], /ge\[bool\] u256 local\[u256\] a \[call\[u256\] u256_from_u64x2 \[arg\[u64\] local\[i64\] b arg\[u64\] const\[u64\] 0\]/],
   ];
-  for (const [what, lines, said] of pairs) {
+  for (const [what, lines, written] of pairs) {
     const fn = functionNamed("typescript", { "module.ts": [...lines, ""].join("\n") }, "module.ts", "f");
     const problems = semanticFunctionProblems(fn);
-    assert.equal(problems.length, 1, `${what} of a wide number and a machine word: ${problems.join("; ")}`);
-    assert.match(problems[0]!, said, what);
+    assert.deepEqual(problems, [], `${what} of a wide number and a machine word: ${problems.join("; ")}`);
+    assert.match(printSemanticFunction(fn), written, what);
   }
 
   // The count of a shift is the machine word the source wrote the shift by, and
@@ -419,11 +418,12 @@ test("a shift count is a machine word whatever the number being shifted is", () 
 });
 
 test("a whole operator over a wide number answers a wide number", () => {
-  // A shift and a remainder are operations on whole numbers, and the answer was
-  // the pair's common type with a side that is not one naming an `i64` — three
-  // limbs dropped before a backend was handed the value. A bitwise pair says the
-  // same thing and is not here only because the program's own reader has no
-  // token for `&`, `|` or `^`.
+  // A shift and a remainder are operations on whole numbers. The source asks
+  // for a `number`, so the wide answer is read as a double on its way out, but
+  // the operation itself is still over a `u256`: the `Number` call wraps an
+  // arithmetic value whose type is the wide number, not the double the source
+  // named. A bitwise pair says the same thing and is not here only because the
+  // program's own reader has no token for `&`, `|` or `^`.
   for (const [what, body] of [["<<", "a << b"], [">>", "a >> b"], ["% ", "a % b"]] as const) {
     const fn = programNamed(
       "typescript",
@@ -441,10 +441,14 @@ test("a whole operator over a wide number answers a wide number", () => {
     );
     const term = fn.entry.terminator;
     assert.equal(term.k, "return", what);
-    if (term.k !== "return" || term.value === null || term.value.k !== "arith") {
+    if (term.k !== "return" || term.value === null || term.value.k !== "call") {
+      assert.fail(`${what} did not lower to a read of the wide answer`);
+    }
+    const [answer] = term.value.call.args;
+    if (answer === undefined || answer.k !== "arith") {
       assert.fail(`${what} did not lower to an arithmetic value`);
     }
-    const answered = term.value.type;
+    const answered = answer.type;
     assert.equal(answered.kind === "primitive" ? answered.name : "", "u256", `${what} of a u256 and a double`);
   }
 });

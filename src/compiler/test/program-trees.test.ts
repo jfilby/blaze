@@ -480,18 +480,20 @@ test("a function nested inside a function declared first is still the program's"
   );
 });
 
-test("a function of a program is given every name of the scope it touches", () => {
-  // A function declared in a program is compiled on its own, so every name it
-  // reads of the scope around it is a parameter of its own. Two walks decide
-  // that list, and a statement kind either walk does not read is a name the
-  // function is not handed at the call — which the resolver then refuses the
-  // body for, on a program the language accepts.
+test("a function of a program reads the names of its scope through getters", () => {
+  // A function declared in a program is compiled on its own, but the names of
+  // the program around it are module values rather than parameters of the call:
+  // a function that reads one is a module function, and the module writes a
+  // `__value_` getter for the value. Two walks decide which functions are
+  // module functions, and a statement kind either walk does not read is a name
+  // the call no longer passes — which the resolver then refuses the body for,
+  // on a program the language accepts.
   //
   // Here a name is written rather than read (`total += n`, `total++`), a buffer
   // is written through its own name (`data[0] = 9`), a loop walks a name rather
   // than a value (`for (const v of data)`), and a call is written as the value
   // of a declaration rather than as a statement — the last one is the transitive
-  // half: `outer` must be given whatever `inner` reads, or it cannot pass it on.
+  // half: `outer` must reach whatever `inner` reads, or it cannot pass it on.
   const source = [
     "const data = new Float64Array([1, 2, 3]);",
     "let total = 0;",
@@ -540,18 +542,23 @@ test("a function of a program is given every name of the scope it touches", () =
   });
   const printed = printSemanticProgram(resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
 
-  // Each is handed the name it touches, and `outer` the name `inner` reads:
-  // reaching the program at all is what these are for, and a name missing from
-  // one of them refused the body for reading something nothing declared.
-  assert.match(printed, /function add\(n: f64, total: f64\) -> void/);
-  assert.match(printed, /function bump\(total: f64\) -> void/);
-  assert.match(printed, /function poke\(data: \[\]f64\) -> void/);
-  assert.match(printed, /function walk\(data: \[\]f64, total: f64\) -> void/);
-  assert.match(printed, /function inner\(x: f64, base: f64\) -> f64/);
-  assert.match(printed, /function outer\(x: f64, base: f64\) -> f64/);
+  // Each keeps the names it declares, and the module values it touches are
+  // getters of the module rather than parameters of the function: reaching the
+  // program at all is what these are for, and a getter missing for a name a
+  // body reads refused the body for reading something nothing declared.
+  assert.match(printed, /function add\(n: f64\) -> void/);
+  assert.match(printed, /function bump\(\) -> void/);
+  assert.match(printed, /function poke\(\) -> void/);
+  assert.match(printed, /function walk\(\) -> void/);
+  assert.match(printed, /function inner\(x: f64\) -> f64/);
+  assert.match(printed, /function outer\(x: f64\) -> f64/);
+  assert.match(printed, /function __value_data\(\) -> slice<f64>/);
+  assert.match(printed, /function __value_base\(\) -> f64/);
 
-  // The call passes what the callee reads, so the two agree.
-  assert.match(printed, /call\[f64\] outer \[arg\[f64\] const\[f64\] 1 arg\[f64\] local\[f64\] base\]/);
+  // The call passes only the declared argument: what the callee reads of the
+  // module is reached through the getter, so the two still agree.
+  assert.match(printed, /call\[void\] add \[arg\[f64\] const\[f64\] 1\]/);
+  assert.match(printed, /call\[f64\] outer \[arg\[f64\] const\[f64\] 1\]/);
 });
 
 test("a truth that is a call is asked of it once, by either driver", async (t) => {

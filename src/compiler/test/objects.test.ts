@@ -840,36 +840,44 @@ test("two layouts that hold a field the same way are one read of it", () => {
   assert.match(printed, /load_field\[f64\] local\[ref<any>\] n Object1 left/);
 });
 
-test("two layouts that hold a field differently are refused by name", () => {
+test("two layouts that hold a field differently are read by name at runtime", () => {
   // `left` is the first field of one object and the second of the other, so
-  // there are two numbers this could read and a backend cannot pick between
-  // them. The refusal names both rather than answering the first.
-  const message = diagnostic(() => {
-    const phase = phaseOf(
-      "typescript",
-      {
-        "1.ts": [
-          "function a(): any {",
-          "  return { left: 1, right: 2 };",
-          "}",
-          "function b(): any {",
-          "  return { up: 0, left: 2 };",
-          "}",
-          "function read(n: any): number {",
-          "  return n.left;",
-          "}",
-          "main();",
-          "",
-        ].join("\n"),
-      },
-      "1.ts",
-    );
+  // there is no one offset a backend could read it from. The reference is an
+  // `any` and carries its layout at runtime, so the read is asked of the
+  // runtime by field name rather than answered from one of the layouts; both
+  // layouts are still named in the function for the emitter to lay out.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "1.ts": [
+        "function a(): any {",
+        "  return { left: 1, right: 2 };",
+        "}",
+        "function b(): any {",
+        "  return { up: 0, left: 2 };",
+        "}",
+        "function read(n: any): number {",
+        "  return n.left;",
+        "}",
+        "main();",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  assert.deepEqual(Object.keys(phase.objectNames).length, 2, "two shapes are two layouts");
+  const printed = printSemanticFunction(
     resolveFunction(phase.program.files[0].functions["read"] as never, {
       objectNames: phase.objectNames,
       functions: {},
-    });
-  });
-  assert.match(message, /reads or writes "ref<any>\.left", which Object1 and Object2 could each be a field of/);
+    }),
+  );
+  assert.match(printed, /object Object1 size 16 align 8/);
+  assert.match(printed, /object Object2 size 16 align 8/);
+  assert.match(
+    printed,
+    /call\[ref<any>\] blaze_rt_object_get_from_handle \[arg\[f64\] local\[ref<any>\] n arg\[text\] \[text "left"\]\]/,
+  );
 });
 
 test("a field read in a tag branch is the arm's layout", () => {
