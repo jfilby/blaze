@@ -14476,13 +14476,10 @@ class TypeScriptParser {
             replace(now);
             continue;
           }
-          // `map.entries()` is the pairs `Object.entries(map)` reports: a Map is
-          // the runtime's dictionary, and the pairs are what the walk reads.
-          if (target.field === "entries" && args.length === 0) {
-            const map: CollectionValue = { kind: "map", key: TEXT_RESULT, value: ANY_TYPE };
-            replace(this.entryPairs(receiver, map, Number(fieldOf(this.peek(), "line"))));
-            continue;
-          }
+          // `.entries()` belongs to the collection pass below: a Map's entries
+          // are the pairs `Object.entries` reports, but a list's entries are its
+          // positions and the elements at them. Reading it here would make a
+          // list's index a text key of a dictionary.
           if ((target.field === "toISOString" || target.field === "getTime") && args.length === 0) {
             const held = this.valueTypeOf(receiver);
             if ((held.kind === "primitive" && held.name === "f64") || (held.kind === "ref" && held.of === null)) {
