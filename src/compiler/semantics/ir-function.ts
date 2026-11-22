@@ -3336,6 +3336,13 @@ class FunctionBody {
   private wideOperand(value: SemanticValue, type: SemanticType, line: number): SemanticValue {
     if (!isWideType(type) || isWideType(fieldOfValue(value, "type") as SemanticType)) return value;
     if (value.k === "const") return this.widenLiteral(value, type);
+    // A narrow whole read from a name widens into the low limb, the same store
+    // the backends make when a slot of the wide type is written from it.
+    if (value.k === "local" && isNumber(value.type) && !isWideType(value.type)) {
+      const zero: SemanticValue = { k: "const", type: { kind: "primitive", name: "u64" }, text: "0" };
+      const widened = this.wideKernel("u256_from_u64x2", [value, zero]);
+      if (widened !== null) return widened;
+    }
     // A field read of an object written at the use is the value the field
     // holds: a constant the module wrote is a literal the source reads, and a
     // literal beside a wide number is widened to the number it says. Without
