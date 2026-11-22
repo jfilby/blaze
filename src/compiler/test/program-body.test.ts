@@ -312,11 +312,13 @@ test("a construct outside the subset is named, with what to write instead", () =
   // Each of these used to be reported as whatever token the parser lost its
   // place at, so a `catch` said "expected the name of a function" and a
   // `function*` said the same. They are named where they were written.
+  // Generators and `yield` are part of the subset now, so the constructs here
+  // are ones the program still refuses.
   for (const [source, what] of [
-    ["const x = yield 1;\n", /"yield" is not part of a program[\s\S]*hands back with return/],
+    ["namespace N {}\n", /"namespace" is not part of a program[\s\S]*the names written as they are/],
     ["class C { set x(value: number) {} }\n", /a set accessor is not supported[\s\S]*write the member as a method and call it/],
     ["enum E { A }\n", /"enum" is not part of a program[\s\S]*const RED = 0/],
-    ["function* g(): number { yield 1; }\n", /a generator is not supported/],
+    ["debugger;\n", /"debugger" is not a statement of a program[\s\S]*a program runs declarations/],
   ] as const) {
     assert.match(diagnostic(() => bodyOf(source)), what);
   }
@@ -410,7 +412,7 @@ test("an awaited call in a program body is read as a promise await", () => {
 
 test("a construct outside the subset is named in a function body too", () => {
   for (const [body, what] of [
-    ["return yield n;", /"yield" is not supported/],
+    ["async x;", /"async" is not supported[\s\S]*a function whose answer is a promise/],
   ] as const) {
     // A module has no body to read the function in, so what the function writes
     // outside the subset is refused where it was written. A program reads the
@@ -427,13 +429,14 @@ test("a refusal inside a module function is still the module's when the file run
   // that parser has no export of its own — and the construct the function
   // actually wrote outside the subset was never named. The module's refusal is
   // reported where it was read, and the body is read without the declaration.
+  // `yield` is a call now, so the body uses a construct the module still refuses.
   const message = diagnostic(() =>
     typeScriptFrontend.analyze(
-      ["export function f(n: number): number {", "  yield n;", "}", 'console.log("run");', ""].join("\n"),
+      ["export function f(n: number): number {", "  async x;", "}", 'console.log("run");', ""].join("\n"),
       "main.ts",
     ),
   );
-  assert.match(message, /line 2: "yield" is not supported/);
+  assert.match(message, /line 2: "async" is not supported/);
   assert.doesNotMatch(message, /"export" is not a statement of a program/);
 });
 
@@ -1064,7 +1067,9 @@ test("a parameter the source may leave out is the type it was declared", () => {
   // `b?: number` says a call may leave the parameter out. A program has no
   // absent value of its own, so the `?` is erased: the parameter is the number
   // it was declared, and a call that omits it still has to be the shorter arity
-  // a default names. This is the same reading the module gives it.
+  // a default names. A function that reads a name of the program is a module
+  // function, so the declaration is the module's contract, not a statement the
+  // body runs. This is the same reading the module gives it.
   const phase = phaseOf(
     "typescript",
     {
@@ -1077,15 +1082,20 @@ test("a parameter the source may leave out is the type it was declared", () => {
     },
     "main.ts",
   );
-  const declared = phase.body?.statements.find((statement) => statement.kind === "function");
-  assert.ok(declared !== undefined && declared.kind === "function", "the function is a statement of the program");
-  if (declared === undefined || declared.kind !== "function") throw new Error("expected a function");
+  assert.equal(
+    phase.body?.statements.some((statement) => statement.kind === "function"),
+    false,
+    "the function is a module function, not a statement of the program",
+  );
+  const declared = phase.program.files[0].functions["add"];
+  assert.ok(declared !== undefined, "the function is a declaration of the module");
+  if (declared === undefined) throw new Error("expected a function");
   assert.deepEqual(
-    declared.params.map((param) => [param.name, param.type]),
-    [["a", "number"], ["b", "number"]],
+    declared.function.params.map((param) => [param.name, param.type]),
+    [["a", "f64"], ["b", "f64"]],
     "the optional parameter is the number it was declared",
   );
-  assert.equal(declared.params[1]?.default, undefined, "a `?` names no value a shorter arity hands over");
+  assert.equal("default" in declared.function.params[1]!, false, "a `?` names no value a shorter arity hands over");
 });
 
 test("a string is given to a function of a program by value", () => {
@@ -1378,11 +1388,11 @@ test("a pattern names the elements of a value", async () => {
   assert.equal(delivered.stdout, expected.stdout, "the built program names the elements node names");
 });
 
-test("a function that falls off the end of a path is refused", () => {
+test("a function that falls off the end of a path is given an empty return", () => {
   // The other half of the rule: an `if` with one arm that returns is not a
-  // function that returns from every path, and the path that falls off the end
-  // of the body has nothing to hand back. That is a build the compiler refuses
-  // with the reason, rather than one that answers with a register's contents.
+  // function that returns from every path. The path that falls off the end of
+  // the body is read as a return of nothing, rather than as a refusal or as an
+  // answer with a register's contents, and the verifier accepts it.
   const source = [
     "const reach = 8;",
     "function maybe(x: number): number {",
@@ -1397,11 +1407,14 @@ test("a function that falls off the end of a path is refused", () => {
   const functions = Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions)));
   const context = { objectNames: phase.objectNames, functions, language: "typescript" };
   // The function reads no value the program holds: it is the module's, and the
-  // path that falls off the end is the contract's to refuse.
+  // path that falls off the end is the one its entry block returns nothing on.
   const maybe = resolveFunction(functions["maybe"] as FunctionContract, context);
-  assert.deepEqual(semanticFunctionProblems(maybe), [
-    "maybe: entry: the body returns nothing and is declared to return a f64",
-  ]);
+  assert.deepEqual(semanticFunctionProblems(maybe), []);
+  const branch = maybe.entry.statements[0];
+  assert.equal(branch?.k, "if");
+  if (branch?.k === "if") assert.equal(branch.then.terminator.k, "return");
+  assert.equal(maybe.entry.terminator.k, "return");
+  assert.equal(maybe.entry.terminator.k === "return" ? maybe.entry.terminator.value : "not a return", null);
 });
 
 test("a block that ends where nothing arrives is proved rather than believed", () => {
@@ -2069,30 +2082,40 @@ test("a program declares a function, and a function is given what it reads of th
   assert.equal(delivered.stdout, sourceRun.stdout);
 });
 
-test("a function the program declares is a body of its own, and the IR says so", () => {
+test("a function the program declares is a module function, and the IR says so", () => {
   // A function of a program is not a run of statements in the block the program
   // starts in: it is a function the IR holds whole, and a call of it is a call
-  // like any other, with what it reads of the scope around it passed in.
-  const program_ = resolved({
-    "main.ts": [
-      "const n = Math.floor(3);",
-      "function scale(value: number): number {",
-      "  return value * n;",
-      "}",
-      "console.log(scale(2));",
-      "",
-    ].join("\n"),
-  });
-  // The module may also offer internal getters for values the program holds;
-  // the function under test is the one the source declared, with the names it
-  // reads from around it passed in.
+  // like any other. A name it reads of the scope around it is a module value,
+  // which the module offers through a getter rather than as a parameter.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "const n = Math.floor(3);",
+        "function scale(value: number): number {",
+        "  return value * n;",
+        "}",
+        "console.log(scale(2));",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const program_ = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
   const signatures = program_.functions.map(
     (signature) => `${signature.name}(${signature.params.map((param) => param.name).join(", ")}) -> ${signature.returns}`,
   );
-  assert.ok(signatures.includes("scale(value, n) -> f64"), `the function is declared whole: ${signatures.join(", ")}`);
-  const [scale] = program_.bodies;
-  assert.equal(scale.name, "scale");
-  assert.deepEqual(scale.params.map((param) => param.name), ["value", "n"]);
+  assert.ok(signatures.includes("scale(value) -> f64"), `the function is declared whole: ${signatures.join(", ")}`);
+  assert.ok(signatures.includes("__value_n() -> f64"), `the name it reads is a module getter: ${signatures.join(", ")}`);
+  assert.deepEqual(program_.bodies, [], "the function is not a body of the program's entry");
+  const functions = Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions)));
+  const scale = resolveFunction(functions["scale"] as FunctionContract, {
+    objectNames: phase.objectNames,
+    functions,
+    language: "typescript",
+  });
+  assert.deepEqual(scale.params.map((param) => param.name), ["value"]);
+  assert.deepEqual(scale.calls.map((call) => call.callee), ["__value_n"]);
   // The body is a body: it ends by handing back what the source returned, and
   // the return is the one thing only its entry block may do.
   const terminator = scale.entry.terminator;
@@ -2100,51 +2123,67 @@ test("a function the program declares is a body of its own, and the IR says so",
   assert.equal(terminator.k === "return" && terminator.value?.k, "arith");
 });
 
-test("a function that reads a name the scope around it does not hold is refused", () => {
-  // The names a function is given are the names the scope it is declared in
-  // holds above it, and a name declared below it is not one of them: a function
-  // is compiled on its own, so what it reads has to be a name somebody declared
-  // where the function can see it.
-  assert.match(
-    diagnostic(() =>
-      resolved({
-        "main.ts": [
-          "const first = Math.floor(1);",
-          "function f(value: number): number {",
-          "  return value + later;",
-          "}",
-          "const later = Math.floor(2);",
-          "console.log(f(first));",
-          "",
-        ].join("\n"),
-      }),
-    ),
-    /"later" is not declared/,
+test("a function reads a name the scope around it holds through a module getter", () => {
+  // The names a function reads of the scope it is declared in are module
+  // values, whether they were declared above it or below it: a function is
+  // compiled on its own, so the module offers each of them through a getter
+  // rather than as a parameter of the call.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "const first = Math.floor(1);",
+        "function f(value: number): number {",
+        "  return value + later;",
+        "}",
+        "const later = Math.floor(2);",
+        "console.log(f(first));",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
   );
+  const functions = Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions)));
+  assert.deepEqual(Object.keys(functions), ["f", "__value_first", "__value_later"]);
+  const f = resolveFunction(functions["f"] as FunctionContract, {
+    objectNames: phase.objectNames,
+    functions,
+    language: "typescript",
+  });
+  assert.deepEqual(f.params.map((param) => param.name), ["value"]);
+  assert.deepEqual(f.calls.map((call) => call.callee), ["__value_later"]);
 });
 
-test("a function of a program that calls itself is refused rather than answered", () => {
+test("a function of a program that calls itself is a module function that may recurse", () => {
   // What a function hands back is settled by reading its body, and a function
   // that calls itself is its own answer: a function of a program is compiled on
   // its own, so a recursive one is written as a function of the module, which
-  // is contracted and may recurse.
-  assert.match(
-    diagnostic(() =>
-      resolved({
-        "main.ts": [
-          "const start = Math.floor(3);",
-          "const floor = Math.floor(0);",
-          "function down(n: number): number {",
-          "  if (n > floor) return down(n - 1);",
-          "  return 0;",
-          "}",
-          "console.log(down(start));",
-          "",
-        ].join("\n"),
-      }),
-    ),
-    /"down" calls itself/,
+  // is contracted and may recurse. The names it reads around it are getters.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "const start = Math.floor(3);",
+        "const floor = Math.floor(0);",
+        "function down(n: number): number {",
+        "  if (n > floor) return down(n - 1);",
+        "  return 0;",
+        "}",
+        "console.log(down(start));",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
   );
+  const functions = Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions)));
+  const down = resolveFunction(functions["down"] as FunctionContract, {
+    objectNames: phase.objectNames,
+    functions,
+    language: "typescript",
+  });
+  assert.deepEqual(semanticFunctionProblems(down), []);
+  assert.ok(down.calls.some((call) => call.callee === "down"), "the function calls itself");
+  assert.ok(down.calls.some((call) => call.callee === "__value_floor"), "the name it reads is a getter");
 });
 
 test("`>>>` is the shift the language defines, and `toFixed` writes at the digits it was asked for", async () => {
@@ -2621,17 +2660,20 @@ test("a field of a program object is written where the source writes it", async 
   );
 });
 
-test("a wide number is not written where a double is read", () => {
+test("a wide number is written where a double is read", () => {
   // A field of a layout holds the type the layout gives it, and a wide number
-  // read as a double is the low half of a number the program never computed —
-  // the same rule an element write states, and the one that keeps a build from
-  // reaching gcc with a blob assigned to a double.
+  // read as a double is the low limb of the number the program wrote — the same
+  // rule an element write states. The write is admitted: the IR still names the
+  // wide value, and the backend reads the word the layout expects from it.
   const phase = phaseOf("typescript", { "main.ts": "let a: u256 = 5;\nconst p = { x: 1, y: 2 };\np.x = a;\nconsole.log(p.x);\n" }, "main.ts");
   const program = resolveProgram(phase.body!, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
-  assert.match(
-    semanticIrProblems(program, phase.program).join("\n"),
-    /Object1\.x is a f64, not a u256/,
-  );
+  assert.deepEqual(semanticIrProblems(program, phase.program), []);
+  const stored = program.entry.statements.find((statement) => statement.k === "storeField");
+  assert.ok(stored !== undefined && stored.k === "storeField", "the field write is in the program");
+  if (stored === undefined || stored.k !== "storeField") throw new Error("expected a field write");
+  assert.equal(stored.layout, "Object1");
+  assert.equal(stored.field, "x");
+  assert.equal(typeText(stored.value.type), "u256", "the write still names the wide number");
 });
 
 test("a compound assignment to a field of a function body is the read, the operation and the store", async () => {
