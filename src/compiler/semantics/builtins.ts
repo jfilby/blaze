@@ -161,6 +161,10 @@ function builtinTable(): Map<string, BuiltinSignature> {
    *  holds the kind, and answers one for the array it holds and nothing
    *  otherwise. */
   "blaze_rt_is_array", { params: [ANY], returns: BOOLEAN, arity: 1 });
+  // Two lists compared with === are compared by what they hold: a module
+  // constant read twice is laid out twice, so comparing the blocks' bytes is
+  // what answers the source's question.
+  table.set("blaze_rt_array_equal", { params: [POINTER, POINTER], returns: BOOLEAN, arity: 2 });
 
   table.set(/** The fields of a value the read cannot name, read by position: the key is
    *  the text one field holds and the value is the handle beside it. */

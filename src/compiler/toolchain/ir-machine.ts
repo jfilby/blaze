@@ -11499,6 +11499,21 @@ class Machine {
     // convention would carry in a vector register.
     if (this.httpBuiltin(call)) return;
     const argument = args[0];
+    if (callee === "blaze_rt_array_equal") {
+      // Two lists are compared by what they hold: the blocks reach the runtime
+      // as the pointers they are, and the service reads both headers.
+      const left = this.hold(POINTER, "blaze_equal_left");
+      const right = this.hold(POINTER, "blaze_equal_right");
+      this.at(args[0] as SemanticValue, POINTER);
+      this.store(left);
+      this.at(args[1] as SemanticValue, POINTER);
+      this.store(right);
+      this.callSymbol("blaze_rt_array_equal", [left, right], NUMBER);
+      // The service answers the double 1 or 0 in XMM0; a truth is the whole
+      // word the question tests, which is the accumulator.
+      this.code.cvtFloatToInt(RAX, XMM0, false, true);
+      return;
+    }
     if (callee === ARGV_LENGTH) {
       this.runtime("_argv_count");
       return;

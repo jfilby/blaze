@@ -948,6 +948,25 @@ test("a for loop that is not a counted loop is the while loop it is", async () =
   }
 });
 
+test("two lists compare by what they hold", async () => {
+  // A module constant is laid out wherever it is read, so comparing the two
+  // blocks by address answers false where the source names one list on both
+  // sides. The runtime reads both headers and compares the bytes instead.
+  const source = [
+    "const A = [`a`, `b`, `c`];",
+    "const B = [`a`, `b`, `c`, `d`];",
+    "export function demo(useA: boolean): string {",
+    "  const x = useA ? A : A;",
+    "  return `${x === A} ${x === B} ${A !== B}`;",
+    "}",
+    "console.log(demo(true), demo(false));", "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "true false true true false true", `the ${backend} backend compares lists`);
+  }
+});
+
 test("new Array is a block of numbers, and fill writes every element", async () => {
   // The source language's `Array` is this compiler's array of numbers: a block
   // of the count written, cleared, which is what a read past what the program

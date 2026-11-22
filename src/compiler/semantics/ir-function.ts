@@ -2539,9 +2539,22 @@ class FunctionBody {
           inferred: asType(BOOL),
         };
       }
-      const wide = isWideType((fieldOfValue(left, "value") as SemanticValue).type) ? (fieldOfValue(left, "value") as SemanticValue).type : isWideType((fieldOfValue(right, "value") as SemanticValue).type) ? (fieldOfValue(right, "value") as SemanticValue).type : null;
-      const leftValue = wide === null ? fieldOfValue(left, "value") as SemanticValue : this.wideOperand(fieldOfValue(left, "value") as SemanticValue, wide, line);
-      const rightValue = wide === null ? fieldOfValue(right, "value") as SemanticValue : this.wideOperand(fieldOfValue(right, "value") as SemanticValue, wide, line);
+      const leftRaw = fieldOfValue(left, "value") as SemanticValue;
+      const rightRaw = fieldOfValue(right, "value") as SemanticValue;
+      // Two lists are compared by what they hold. A module constant is laid
+      // out afresh wherever the source reads it, so the blocks are different
+      // pointers even where the source names one list on both sides; the
+      // runtime service reads both headers and compares the bytes.
+      if (isSequence(leftRaw.type) && isSequence(rightRaw.type)) {
+        const equal = this.runtimeCall("blaze_rt_array_equal", [leftRaw, rightRaw], BOOLEAN).value;
+        const answer = op === "==" || op === "==="
+          ? equal
+          : { k: "unary" as const, type: BOOLEAN, op: "not" as const, operand: equal };
+        return { value: answer, inferred: asType(BOOL) };
+      }
+      const wide = isWideType(leftRaw.type) ? leftRaw.type : isWideType(rightRaw.type) ? rightRaw.type : null;
+      const leftValue = wide === null ? leftRaw : this.wideOperand(leftRaw, wide, line);
+      const rightValue = wide === null ? rightRaw : this.wideOperand(rightRaw, wide, line);
       return {
         value: {
           k: "compare",

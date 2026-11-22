@@ -1545,6 +1545,16 @@ proc blaze_rt_own_key*(value: BlazeValue, key: cstring): float64 {.exportc, cdec
     field = cast[cstring](cast[uint](field) + uint(kind.len) + 1)
   0.0
 
+proc blaze_rt_array_equal*(left, right: pointer): cdouble {.exportc, cdecl.} =
+  ## Two blocks are equal when they hold the same bytes, so a constant read
+  ## twice and laid out twice still answers the same list.
+  if left == right: return 1.0
+  if left == nil or right == nil: return 0.0
+  let leftBytes = blaze_rt_object_size(left)
+  if leftBytes != blaze_rt_object_size(right): return 0.0
+  if leftBytes > 0'u64 and compareMem(left, right, int(leftBytes)) != 0: return 0.0
+  return 1.0
+
 proc blaze_rt_array_copy*(source: pointer): pointer {.exportc, cdecl.} =
   ## A block of elements copied: a list a program holds is the block and the
   ## length its header measures, so a spread of one is these bytes again.

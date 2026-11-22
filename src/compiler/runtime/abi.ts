@@ -1315,6 +1315,7 @@ entry(
   ),
   entry("blaze_rt_dict_len", "double", [["dict", "BlazeValue"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
   entry("blaze_rt_array_copy", "void*", [["block", "void*"]], "Copies a block of elements.", "Returns a block of its own holding the same bytes; the header states how many elements it holds.", { tags: ["object"] }),
+  entry("blaze_rt_array_equal", "double", [["left", "void*"], ["right", "void*"]], "Compares two blocks of elements by what they hold.", "Two lists are equal when they hold the same number of bytes and every byte is the same; inlined module constants are different blocks that say the same thing.", { tags: ["object"] }),
   entry("blaze_rt_array_join", "void*", [["left", "void*"], ["right", "void*"]], "Joins two blocks of elements.", "Returns a block holding the left's bytes followed by the right's; the header states how many elements it holds.", { tags: ["object"] }),
   entry("blaze_rt_dict_values", "double*", [["dict", "BlazeValue"]], "Lays a dictionary's values down as a block.", "Returns the block, in the order the keys were first written; its header states how many values it holds.", { tags: ["object"] }),
   entry("blaze_rt_dict_key_at", "const char*", [["dict", "BlazeValue"], ["index", "double"]], "Reads the key of one entry of a dictionary by its position.", "Returns the key, or the empty text when the position names no entry. The key belongs to the dictionary and is valid until the entry is removed.", { tags: ["object"] }),
@@ -5470,6 +5471,15 @@ static int blaze_rt_dynamic_field(blaze_dyn* d, const char* key) {
    A list a program holds is the block and the length its header measures, so a
    spread of one is a copy of those bytes: a spread alone is a block of its own,
    and a spread of two is the two blocks' bytes one after the other. */
+
+double blaze_rt_array_equal(void* left, void* right) {
+  if (left == right) return 1.0;
+  if (left == NULL || right == NULL) return 0.0;
+  const size_t leftBytes = blaze_rt_header_of(left)->length;
+  if (leftBytes != blaze_rt_header_of(right)->length) return 0.0;
+  if (leftBytes > 0 && memcmp(left, right, leftBytes) != 0) return 0.0;
+  return 1.0;
+}
 
 void* blaze_rt_array_copy(void* block) {
   if (block == NULL) return blaze_rt_allocate(0);
