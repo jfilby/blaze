@@ -421,7 +421,9 @@ function loopSlots(loop: SemanticLoop): SemanticSlot[] {
   if (loop.kind === "each") {
     return [
       { kind: "value", name: loop.index, mutable: true, type: { kind: "primitive", name: "usize" } },
-      { kind: "value", name: loop.element, mutable: false, type: loop.elementType },
+      // A body that mutates the walked value (a `.length` write or a `.push`)
+      // lowers to a reassignment of the element name, so the slot is writable.
+      { kind: "value", name: loop.element, mutable: true, type: loop.elementType },
     ];
   }
   return [];

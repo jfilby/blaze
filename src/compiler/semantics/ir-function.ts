@@ -1056,10 +1056,14 @@ class FunctionBody {
           : { k: "length", type: USIZE, of: sourceLocal };
         const index = this.generated("i");
         this.open();
+        // Each turn rebinds the walked element, but a body that mutates it
+        // (a `.length` write or a `.push`) lowers to a reassignment of the name,
+        // so the slot is mutable. The rebind at each turn keeps the source's
+        // const binding of the loop variable.
         this.bind(String(fieldOfValue(statement, "variable")), {
           name: String(fieldOfValue(statement, "variable")),
           inferred: asType(element),
-          slot: { kind: "value", name: String(fieldOfValue(statement, "variable")), mutable: false, type: element },
+          slot: { kind: "value", name: String(fieldOfValue(statement, "variable")), mutable: true, type: element },
         });
         const walked = this.loop(fieldOfValue(statement, "body") as Statement[]);
         this.close();
