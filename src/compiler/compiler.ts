@@ -92,6 +92,7 @@ import {
 } from "./codegen.ts";
 import { CompilerError, isCompilerError, toCompilerError } from "./core/errors.ts";
 import { createJsonStore, flushToDisk, hashText, hashValue, type JsonStore, storeResolve, storeWrite, storeExists, storeRemove, storeMkdirp, storeRead, storeReadIfValid } from "./core/json-store.ts";
+import { compactContract, expandContract } from "./core/contract-store.ts";
 import { byName } from "./core/named-record.ts";
 import { frontendFor } from "./semantics/frontend.ts";
 import { resolveModel, type ModelConfiguration } from "./ai/model.ts";
@@ -2083,7 +2084,11 @@ export async function runBuild(
     }));
     setFieldOn(build, "sourceHash", sourceHash);
     setFieldOn(build, "contractHash", hashValue(program));
-    await storeWrite(store, String(fieldOf(paths, "contract")), program);
+    // The object pass writes one whole-program layout table into every function.
+  // Keep it once on disk and write it back into each definition on read, so a
+  // build of the compiler does not serialize thousands of copies of its module
+  // graph.
+  await storeWrite(store, String(fieldOf(paths, "contract")), compactContract(program));
     reporter(
       "contract",
       "ok",
@@ -3055,7 +3060,7 @@ async function loadStored(
   if (!(await storeExists(store, contractPath))) {
     throw new CompilerError("StorageError", "load", `unknown project "${project}"`, `no contract at ${contractPath}`, "", "", "");
   }
-  const program = await storeRead<ProgramContract>(store, contractPath);
+  const program = expandContract(await storeRead(store, contractPath));
   const programFields = program as unknown as Record<string, unknown>;
   const entry = programFields["entry"] as Record<string, unknown>;
   // A stored program records which functions it compiled, so `blaze test` and
