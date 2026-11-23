@@ -392,8 +392,23 @@ module's function lookup, the body's scopes, parameters, program calls, locals
 and carrier facts build, and the next local gate is the body's value emitter.
 The frontend gate is clear: `test/self-host.test.ts` passes with 107 sources
 and zero refusals, and `test/self-host-ir.test.ts` resolves every compiler
-contract into IR. A self-build advances one function at a time as the IR
-validator finds a mismatch; each fix has a regression in
-`test/self-build-regressions.test.ts`. The build has not yet completed, and
-fixed point is not verified. The fixed-point test
-(`test/fixed-point.test.ts`) is in place but opt-in.
+contract into IR. The **validation gate is clear too**: all 7735 contracts
+of the self-build resolve into IR and pass `semanticFunctionProblems` with no
+problems. Every mismatch found along the way has a regression in
+`test/self-build-regressions.test.ts`, `test/ir-c.test.ts` or
+`test/language-features.test.ts`.
+
+The build has not completed, and fixed point is not verified. The remaining
+blocker is scale, not correctness. `consoleReporter` returns a closure, which
+the machine backend cannot carry, so the whole program falls back to the C
+backend; the C driver then compiles thousands of functions one at a time. The
+contract the build writes for the tree is about 21 GB on disk (7.35 GB of JSON
+before pretty-printing), because each of the 7735 contracts carries the object
+layouts and expressions of the whole module graph. Resolving and validating all
+functions takes hours, and a full `--recompile` of the tree has not finished
+within an eight-hour budget per stage. The fixed-point test
+(`test/fixed-point.test.ts`) is in place and opt-in; its build timeout and the
+self-build project's single benchmark iteration are set for that long build.
+Closing rung 4 needs either closures in the machine backend, or a contract
+representation that does not inline the whole module graph into every function
+— both are compiler changes, not changes to the source the compiler reads.
