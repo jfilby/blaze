@@ -398,17 +398,23 @@ problems. Every mismatch found along the way has a regression in
 `test/self-build-regressions.test.ts`, `test/ir-c.test.ts` or
 `test/language-features.test.ts`.
 
-The build has not completed, and fixed point is not verified. The remaining
-blocker is scale, not correctness. `consoleReporter` returns a closure, which
-the machine backend cannot carry, so the whole program falls back to the C
-backend; the C driver then compiles thousands of functions one at a time. The
-contract the build writes for the tree is about 21 GB on disk (7.35 GB of JSON
-before pretty-printing), because each of the 7735 contracts carries the object
-layouts and expressions of the whole module graph. Resolving and validating all
-functions takes hours, and a full `--recompile` of the tree has not finished
-within an eight-hour budget per stage. The fixed-point test
+The contract representation no longer duplicates the module graph. The object
+pass writes one whole-program layout table into every function definition; in
+memory that is one shared reference, but JSON has no sharing, so the stored
+contract was ~7.35 GB of repeated tables (21 GB pretty-printed). `core/contract-store.ts`
+now keeps the layout and tag tables once at the program level, leaves each
+definition without them, and writes them back by identity on read — every
+consumer still sees a self-contained function. The whole self-build contract
+now serializes to about 79 MB. `test/contract-store.test.ts` holds the disk
+form, the round trip and backward compatibility.
+
+The build has not completed, and fixed point is not verified. What remains is
+scale in code generation: `consoleReporter` returns a closure, which the
+machine backend cannot carry, so the whole program falls back to the C backend;
+the C driver then compiles thousands of functions one at a time. Resolving and
+validating all functions also takes hours. The fixed-point test
 (`test/fixed-point.test.ts`) is in place and opt-in; its build timeout and the
 self-build project's single benchmark iteration are set for that long build.
-Closing rung 4 needs either closures in the machine backend, or a contract
-representation that does not inline the whole module graph into every function
-— both are compiler changes, not changes to the source the compiler reads.
+Closing rung 4 needs closures in the machine backend, or a way to generate the
+whole program without one C compilation per function — both compiler changes,
+not changes to the source the compiler reads.
