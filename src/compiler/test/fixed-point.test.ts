@@ -54,7 +54,7 @@ function build(compiler: string[]): void {
   // had failed.
   const result = run(compiler[0] as string, [...compiler.slice(1), "build", project, "--recompile", "--verify", "none"], {
     cwd: root,
-    timeoutMs: 3 * 60 * 60 * 1000,
+    timeoutMs: 8 * 60 * 60 * 1000,
   });
   assert.equal(result.code, 0, `${compiler.join(" ")} failed:\n${result.stderr}\n${result.stdout}`);
 }

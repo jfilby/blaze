@@ -4,6 +4,13 @@ output = "machine"
 backend = "machine"
 mode = "debug"
 
+# A self-build runs the rules alone, so there is one candidate per function and
+# no choice for a benchmark to make. Measuring every candidate 2000 times adds
+# hours to a build of the whole compiler without changing the IR a fixed point
+# compares; one iteration keeps the measurement and makes the build finish.
+[benchmark]
+iterations = 1
+
 [model]
 # provider = "nebius"
 # model = "nvidia/Nemotron-3_5-Lightning"
