@@ -61,6 +61,15 @@ test("a read contract writes the shared table back into every definition", () =>
   assert.equal(functions[0]!.definition.objects, functions[functions.length - 1]!.definition.objects, "the table is one shared object");
 });
 
+test("a function named like an inherited key survives the compact form", () => {
+  const program = programOf("typescript", { "main.ts": "export function __proto__(x: number): number { return x; }\nmain();" }, "main.ts");
+  const compact = compactContract(program) as Record<string, unknown>;
+  const files = compact["files"] as { functions: Record<string, unknown> }[];
+  assert.ok(Object.prototype.hasOwnProperty.call(files[0]!.functions, "__proto__"), "the function is an own key on disk");
+  const restored = expandContract(JSON.parse(JSON.stringify(compact)));
+  assert.ok(Object.prototype.hasOwnProperty.call(restored.files[0]!.functions, "__proto__"), "the function is an own key on read");
+});
+
 test("a contract written before the compact form is read unchanged", () => {
   const program = programOf("typescript", { "main.ts": source }, "main.ts");
   const restored = expandContract(JSON.parse(JSON.stringify(program)));

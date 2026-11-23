@@ -17,6 +17,7 @@
  */
 
 import type { ProgramContract } from "./types.ts";
+import { byName } from "./named-record.ts";
 
 type RecordValue = Record<string, unknown>;
 
@@ -75,24 +76,30 @@ export function compactContract(program: ProgramContract): unknown {
   const compactFiles: RecordValue[] = [];
   for (const file of files) {
     const functions = file["functions"] as Record<string, RecordValue>;
-    const compactFunctions: Record<string, RecordValue> = {};
+    // A function may be named `__proto__`. Building the record by assignment
+    // would set the prototype instead of writing an entry; byName defines it
+    // as an ordinary own property the way the contract phase does.
+    const compactFunctions: [string, RecordValue][] = [];
     for (const [name, contract] of Object.entries(functions)) {
-      compactFunctions[name] = {
-        version: contract["version"],
-        function: contract["function"],
-        promise: contract["promise"],
-        requires: contract["requires"],
-        ensures: contract["ensures"],
-        memory: contract["memory"],
-        effects: contract["effects"],
-        numeric: contract["numeric"],
-        optimize: contract["optimize"],
-        definition: sharedDefinition((contract["definition"] as unknown as RecordValue)),
-      };
+      compactFunctions.push([
+        name,
+        {
+          version: contract["version"],
+          function: contract["function"],
+          promise: contract["promise"],
+          requires: contract["requires"],
+          ensures: contract["ensures"],
+          memory: contract["memory"],
+          effects: contract["effects"],
+          numeric: contract["numeric"],
+          optimize: contract["optimize"],
+          definition: sharedDefinition(contract["definition"] as unknown as RecordValue),
+        },
+      ]);
     }
     compactFiles.push({
       path: file["path"],
-      functions: compactFunctions,
+      functions: byName(compactFunctions),
       imports: file["imports"],
     });
   }
