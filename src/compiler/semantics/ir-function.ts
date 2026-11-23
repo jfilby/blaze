@@ -2960,12 +2960,14 @@ class FunctionBody {
     // operation rather than one over references.
     if (op === "-" || op === "~") operandValue = this.asNumber(operandValue);
     // A complement of an unsigned wide number would be below zero, which a
-    // u256 has no spelling for. Where the wide value is read into a machine
-    // word the low limb is the value, so complement that limb instead: this is
-    // the same narrowing a wide value already makes when it is written into an
-    // i64 field, and it keeps a bitset's mask a machine word.
+    // u256 has no spelling for, and is refused where the source asks for a wide
+    // answer. Where the wide value is only read into a machine word — a field
+    // write gives no wide expectation — the low limb is the value, so complement
+    // that limb instead. This keeps a bitset's mask a machine word without
+    // answering `~` of a u256 where the source expects the wide number.
+    const wantsWide = expect !== null && expect.kind === "type" && isWideType(expect.type);
     let narrowedComplement = false;
-    if (op === "~" && isWideType(operandValue.type)) {
+    if (op === "~" && isWideType(operandValue.type) && !wantsWide) {
       const low = this.wideKernel("u256_low", [operandValue]);
       if (low !== null) {
         operandValue = low;
