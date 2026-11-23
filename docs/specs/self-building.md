@@ -405,8 +405,9 @@ contract was ~7.35 GB of repeated tables (21 GB pretty-printed). `core/contract-
 now keeps the layout and tag tables once at the program level, leaves each
 definition without them, and writes them back by identity on read — every
 consumer still sees a self-contained function. The whole self-build contract
-now serializes to about 79 MB. `test/contract-store.test.ts` holds the disk
-form, the round trip and backward compatibility.
+is now about 79 MB of compact JSON (~1 GB in the pretty-printed store), down
+from 7.35 GB (21 GB in the store). `test/contract-store.test.ts` holds the disk
+form, the round trip, a function named `__proto__`, and backward compatibility.
 
 The build has not completed, and fixed point is not verified. What remains is
 scale in code generation: `consoleReporter` returns a closure, which the
