@@ -64,6 +64,27 @@ test("resolving a call cost states when the callee is unknown", () => {
   assert.deepEqual(resolveCallCost("Math.floor", callees, DEFAULT_COST_MODEL, true), { status: "known", value: DEFAULT_COST_MODEL.call });
 });
 
+test("a shared callee is priced once in a turn", () => {
+  // A diamond chain has exponentially many paths through it: f0 calls f1 and
+  // f2, both call f3, and f3 opens the next diamond. Walking the cost once per
+  // path never finishes for a graph deep enough, while the answer is the same
+  // as walking each callee's body once and adding its price wherever it is used.
+  const callees = new Map<string, SemanticFunction>();
+  let current = "leaf";
+  for (let diamond = 0; diamond < 40; diamond += 1) {
+    const left = `left${diamond}`;
+    const right = `right${diamond}`;
+    const next = `next${diamond}`;
+    callees.set(left, fn(left, [callStatement(current)]));
+    callees.set(right, fn(right, [callStatement(current)]));
+    callees.set(next, fn(next, [callStatement(left), callStatement(right)]));
+    current = next;
+  }
+  callees.set("leaf", fn("leaf", []));
+  const assessment = turnCostAssessment(block([callStatement(current)]), callees);
+  assert.equal(assessment.status, "known", "the shared graph has a known cost");
+});
+
 test("a turn that calls a body the build holds has a known assessment", () => {
   const body = block([callStatement("helper")]);
   const callee = fn("helper", [callStatement("leaf"), callStatement("leaf")]);

@@ -175,7 +175,7 @@ export function refusalFor(
   if (loop.kind === "counted" && !canonicalCounted(loop)) {
     return "the counter is not a whole number counting up one at a time, which is the only shape a parallel loop takes";
   }
-  const reach: Reach = { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map() };
+  const reach: Reach = { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map(), costs: new Map() };
   if (turnIsTooCheapIn(fieldOf(loop, "body") as SemanticBlock, reach)) {
     return "a turn of this loop computes so little that a team of threads costs more than the turns it runs";
   }
@@ -340,6 +340,8 @@ interface Reach {
   readonly verdicts: Map<string, Refusal | null>;
   /** What each callee was found to answer, kept so a shared callee is read once. */
   readonly wholes: Map<string, boolean>;
+  /** What each callee's turn was found to cost, kept so a shared callee is priced once. */
+  readonly costs: Map<string, TurnCost>;
 }
 
 /**
@@ -465,7 +467,7 @@ const MINIMUM_VALUES_PER_TURN = 8;
  * this produced.
  */
 export function turnIsTooCheap(body: SemanticBlock, callees: Callees = new Map(), model: CostModel = DEFAULT_COST_MODEL): boolean {
-  return turnIsTooCheapIn(body, { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map() });
+  return turnIsTooCheapIn(body, { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map(), costs: new Map() });
 }
 
 function turnIsTooCheapIn(body: SemanticBlock, reach: Reach): boolean {
@@ -485,7 +487,7 @@ export function turnCostAssessment(
   callees: Callees = new Map(),
   model: CostModel = DEFAULT_COST_MODEL,
 ): Assessment<number> {
-  const reach: Reach = { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map() };
+  const reach: Reach = { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map(), costs: new Map() };
   const cost: TurnCost = { values: 0, unbounded: false, unresolved: 0 };
   measureTurn(body, reach, cost);
   if (fieldOf(cost, "unbounded") === true) {
@@ -551,9 +553,29 @@ function measureCall(name: string, reach: Reach, cost: TurnCost): void {
     setFieldOn(cost, "unbounded", true);
     return;
   }
+  // A callee reached twice in one assessment is priced once. Without this, a
+  // call graph whose callees share callees of their own is walked once per path
+  // through it, which is exponential in the depth of the graph — a compiler
+  // reading its own graph of thousands of functions never finishes a turn.
+  const costs = fieldOf(reach, "costs") as Map<string, TurnCost>;
+  const cached = costs.get(calleeName);
+  if (cached !== undefined) {
+    addCost(cost, cached);
+    return;
+  }
+  const own: TurnCost = { values: 0, unbounded: false, unresolved: 0 };
   reading.add(calleeName);
-  measureTurn(fieldOf(callee, "entry") as SemanticBlock, reach, cost);
+  measureTurn(fieldOf(callee, "entry") as SemanticBlock, reach, own);
   reading.delete(calleeName);
+  costs.set(calleeName, own);
+  addCost(cost, own);
+}
+
+/** Add one measured cost into another. */
+function addCost(into: TurnCost, from: TurnCost): void {
+  setFieldOn(into, "values", Number(fieldOf(into, "values")) + Number(fieldOf(from, "values")));
+  setFieldOn(into, "unresolved", Number(fieldOf(into, "unresolved")) + Number(fieldOf(from, "unresolved")));
+  if (fieldOf(from, "unbounded") === true) setFieldOn(into, "unbounded", true);
 }
 
 /** One element of an array the body reaches, and whether the body writes it. */
@@ -591,7 +613,7 @@ function bodyRefusal(
   body: SemanticBlock,
   counter: string | null,
   callees: Callees,
-  reach: Reach = { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() },
+  reach: Reach = { callees, reading: new Set(), verdicts: new Map(), wholes: new Map(), costs: new Map() },
   combined: ReadonlyMap<string, SemanticReduction> = new Map(),
   perCall: readonly string[] = [],
 ): Refusal | null {
