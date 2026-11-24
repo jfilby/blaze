@@ -354,6 +354,7 @@ test("a build with no model configured runs the rules alone", async (t) => {
     candidates.dotProduct.map((candidate) => [candidate.id, candidate.model, candidate.proposals, candidate.feedback]),
     [["c1", "compiler", undefined, undefined]],
   );
+  assert.match(candidates.dotProduct[0]!.text, /^function dotProduct/, "the stored candidate keeps its IR text after the build releases it");
   const verification = JSON.parse(
     await readFile(join(await storeDirectory(directory, "input"), "verification.json"), "utf8"),
   ) as Record<string, VerificationResult[]>;

@@ -76,7 +76,7 @@ export interface PreparedLibrary {
   headerPath: string;
   objectPath: string;
 }
-import { monotonicTimeNs, readFile, stat, writeFile, dirname } from "./core/platform.ts";
+import { monotonicTimeNs, readFile, readFileSync, stat, writeFile, dirname } from "./core/platform.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import type { SemanticBlock, SemanticFunction } from "./core/semantic-ir.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
@@ -234,6 +234,79 @@ interface CandidatePaths {
   executable: string;
   module: string;
   host: string;
+}
+
+/**
+ * A candidate whose IR text lives in the file the toolchain already wrote.
+ *
+ * A build of the whole compiler keeps thousands of candidates until it writes
+ * their records. Retaining every IR string in the heap exhausts Node before the
+ * last function is generated. The text is held only until the toolchain has
+ * written it; afterwards a read loads it for a review, a repair or the final
+ * JSON one candidate at a time. `toJSON` is the synchronous hook the store's
+ * streaming writer asks for, so serialising the records does not bring them all
+ * back into memory at once.
+ */
+class StoredCandidate implements Candidate {
+  id: string;
+  model: string;
+  modelConfig: string;
+  generatedAt: string;
+  candidate: number;
+  round: number;
+  proposals?: string[];
+  feedback?: string[];
+  private readonly file: string;
+  private pending: string | null;
+
+  constructor(candidate: Candidate, file: string) {
+    this.id = String(fieldOf(candidate, "id"));
+    this.model = String(fieldOf(candidate, "model"));
+    this.modelConfig = String(fieldOf(candidate, "modelConfig"));
+    this.generatedAt = String(fieldOf(candidate, "generatedAt"));
+    this.candidate = Number(fieldOf(candidate, "candidate"));
+    this.round = Number(fieldOf(candidate, "round"));
+    const proposals = fieldOf(candidate, "proposals") as string[] | undefined;
+    const feedback = fieldOf(candidate, "feedback") as string[] | undefined;
+    if (proposals !== undefined) this.proposals = proposals;
+    if (feedback !== undefined) this.feedback = feedback;
+    this.file = file;
+    this.pending = String(fieldOf(candidate, "text"));
+  }
+
+  get text(): string {
+    return this.pending === null ? readFileSync(this.file, "utf8") : this.pending;
+  }
+
+  /** The file now owns the text; let the string go. */
+  spool(): void {
+    this.pending = null;
+  }
+
+  toJSON(): Record<string, unknown> {
+    const record: Record<string, unknown> = {
+      id: this.id,
+      text: this.text,
+      model: this.model,
+      modelConfig: this.modelConfig,
+      generatedAt: this.generatedAt,
+      candidate: this.candidate,
+      round: this.round,
+    };
+    if (this.proposals !== undefined) record["proposals"] = this.proposals;
+    if (this.feedback !== undefined) record["feedback"] = this.feedback;
+    return record;
+  }
+}
+
+/** A candidate backed by the implementation file its toolchain writes. */
+function storedCandidate(request: CandidateEvaluationRequest, candidate: Candidate): Candidate {
+  const paths = candidateFiles(
+    fieldOf(request, "workspace") as CodegenWorkspace,
+    String(fieldOf(candidate, "id")),
+    fieldOf(request, "output") as OutputKind,
+  );
+  return new StoredCandidate(candidate, String(fieldOf(paths, "implementation")));
 }
 
 /**
@@ -934,6 +1007,7 @@ async function buildCandidate(
     // refusal that names a line of the IR and leaves no copy of the IR is a
     // diagnostic nothing can be done about.
     await writeFile(String(fieldOf(paths, "implementation")), String(fieldOf(candidate, "text")), "utf8");
+    if (candidate instanceof StoredCandidate) candidate.spool();
 
     // A candidate may call the other functions of the program, and one that does
     // is linked only into the program, so nothing about it can be run on its own.
@@ -1360,8 +1434,9 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   // first. A build that reuses this way is a build that is choosing again, and
   // the only thing it saves is the asking.
   for (const one of existing) {
-    candidates.push(one);
-    outcomes.push(await evaluateCandidate(request, one, vectors));
+    const stored = storedCandidate(request, one);
+    candidates.push(stored);
+    outcomes.push(await evaluateCandidate(request, stored, vectors));
   }
   const reused = selectCandidate(outcomes, contract);
   if (reused !== null) {
@@ -1416,7 +1491,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   // review of the target either.
   if (fieldOf(request, "backend") === undefined) {
     const base = fieldOf(request, "base") as SemanticFunction;
-    const candidate: Candidate = {
+    const candidate = storedCandidate(request, {
       id: allocateId(),
       text: printSemanticFunction(optimizeSemanticFunction(structuredClone(base), context.functions)),
       model: "compiler",
@@ -1424,7 +1499,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
       generatedAt: new Date().toISOString(),
       candidate: 1,
       round: 1,
-    };
+    });
     candidates.push(candidate);
     outcomes.push(await evaluateCandidate(request, candidate, vectors));
     return {
@@ -1520,7 +1595,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
         const revision = revise(current, review, request, context);
         refusals.splice(0, refusals.length, ...revision.refused);
 
-        const regenerated: Candidate = {
+        const regenerated = storedCandidate(request, {
           id: allocateId(),
           text: String(fieldOf(revision, "text")),
           model: String(fieldOf(generationBackend(), "id")),
@@ -1530,7 +1605,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
           round: attempt,
           ...(revision.applied.length === 0 ? {} : { proposals: [...revision.applied] }),
           ...(diagnostics.length === 0 ? {} : { feedback: [...diagnostics] }),
-        };
+        });
         const chainCandidates = fieldOf(chain, "candidates") as Candidate[];
         chainCandidates.push(regenerated);
 
@@ -1607,7 +1682,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   if (revision.applied.length === 0) {
     return { candidates, outcomes, selected, benchmarkVector, modelDurationNs };
   }
-  const revised: Candidate = {
+  const revised = storedCandidate(request, {
     id: allocateId(),
     text: String(fieldOf(revision, "text")),
     model: String(fieldOf(generationBackend(), "id")),
@@ -1616,7 +1691,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
     candidate: Number(fieldOf(winner, "candidate")),
     round: 1,
     proposals: [...revision.applied],
-  };
+  });
   const outcome = await evaluateCandidate(request, revised, vectors);
   candidates.push(revised);
   outcomes.push(outcome);
