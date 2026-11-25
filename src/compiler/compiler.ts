@@ -91,7 +91,7 @@ import {
   type PreparedRuntime,
 } from "./codegen.ts";
 import { CompilerError, isCompilerError, toCompilerError } from "./core/errors.ts";
-import { createJsonStore, flushToDisk, hashText, hashValue, type JsonStore, storeResolve, storeWrite, storeWriteEntries, storeExists, storeRemove, storeMkdirp, storeRead, storeReadIfValid } from "./core/json-store.ts";
+import { createJsonStore, flushToDisk, hashText, hashValue, type JsonStore, storeResolve, storeWrite, storeWriteEntries, storeWriteGenerationEntries, storeExists, storeRemove, storeMkdirp, storeRead, storeReadIfValid } from "./core/json-store.ts";
 import { compactContract, expandContract } from "./core/contract-store.ts";
 import { byName } from "./core/named-record.ts";
 import { frontendFor } from "./semantics/frontend.ts";
@@ -2653,7 +2653,7 @@ export async function runBuild(
         }]);
       }
       await storeWriteEntries(store, candidatesPath, candidateEntries);
-      await storeWriteEntries(
+      await storeWriteGenerationEntries(
         store,
         generationPath,
         generationEntries,
@@ -2665,7 +2665,6 @@ export async function runBuild(
         {
           modelDurationNs: String(generated.reduce((total: number, entry) => total + Number(entry.modelDurationNs), 0)),
         },
-        "functions",
       );
       await storeWriteEntries(store, verificationPath, verificationEntries);
       await storeWriteEntries(store, benchmarkPath, benchmarkEntries);

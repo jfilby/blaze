@@ -263,13 +263,13 @@ export async function storeWriteChunks(
  * `before` and `after` hold the fixed fields around the streamed entries, as
  * `generation.json` needs its model and total duration around `functions`.
  */
-export async function storeWriteEntries(
+async function storeWriteEntriesAround(
   store: JsonStore,
   relativePath: string,
   entries: readonly (readonly [string, () => Promise<unknown>])[],
-  before: Record<string, unknown> = {},
-  after: Record<string, unknown> = {},
-  entriesKey?: string,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  entriesKey: string | null,
 ): Promise<void> {
   const file = storeResolve(store, relativePath);
   await storeMkdirp(store, dirname(relative(String(fieldOf(store, "root")), file)));
@@ -287,8 +287,8 @@ export async function storeWriteEntries(
       }
     };
     fixed(before);
-    const indent = entriesKey === undefined ? "  " : "    ";
-    if (entriesKey !== undefined) {
+    const indent = entriesKey === null ? "  " : "    ";
+    if (entriesKey !== null) {
       if (!first) batch += ",\n";
       first = false;
       batch += `  ${JSON.stringify(entriesKey)}: {\n`;
@@ -304,7 +304,7 @@ export async function storeWriteEntries(
         batch = "";
       }
     }
-    if (entriesKey !== undefined) {
+    if (entriesKey !== null) {
       batch += "\n  }";
       first = false;
     }
@@ -319,6 +319,26 @@ export async function storeWriteEntries(
     await rm(temporary, false, true);
     throw new CompilerError("StorageError", "storage", `cannot write ${relativePath}`, String(cause), "", "", "");
   }
+}
+
+/** Write a JSON object whose values are loaded one at a time. */
+export async function storeWriteEntries(
+  store: JsonStore,
+  relativePath: string,
+  entries: readonly (readonly [string, () => Promise<unknown>])[],
+): Promise<void> {
+  await storeWriteEntriesAround(store, relativePath, entries, {}, {}, null);
+}
+
+/** Write fixed fields around a nested `functions` object loaded one entry at a time. */
+export async function storeWriteGenerationEntries(
+  store: JsonStore,
+  relativePath: string,
+  entries: readonly (readonly [string, () => Promise<unknown>])[],
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): Promise<void> {
+  await storeWriteEntriesAround(store, relativePath, entries, before, after, "functions");
 }
 
 export async function storeExists(store: JsonStore, relativePath: string): Promise<boolean> {
