@@ -2067,7 +2067,10 @@ class FunctionBody {
                 ? "Promise.await.value"
                 : "Promise.await";
       const awaited = builtinFor(callee) as BuiltinSignature;
-      const returns = listPayload ? payload as SemanticType : fieldOfValue(awaited, "returns") as SemanticType;
+      // A reference payload keeps the reference type the contract named. The
+      // runtime service answers an opaque handle, but the await is read at the
+      // payload's layout so a destructured record keeps its field types.
+      const returns = listPayload || payload.kind === "ref" ? payload as SemanticType : fieldOfValue(awaited, "returns") as SemanticType;
       return {
         value: {
           k: "call",

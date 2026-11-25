@@ -965,6 +965,25 @@ test("an async arrow carries its text payload beside a promise handle", () => {
   assert.match(printSemanticFunction(demo), /Promise\.await\.text \[arg\[ref<any>\] \[call\[ref<any>\]/, "the await takes the closure's handle");
 });
 
+test("an awaited record keeps the payload's named layout", () => {
+  // Promise.await.value answers an opaque handle, but the contract names the
+  // record it carries. The await must keep that named reference so a field read
+  // is a number rather than a read through ref<any>.
+  const source = [
+    "interface Result { value: number }",
+    "async function get(): Promise<Result> { return { value: 7 }; }",
+    "export async function demo(): Promise<number> {",
+    "  const result = await get();",
+    "  return result.value;",
+    "}",
+    "main();",
+  ].join("\n");
+  const { fn, contract } = resolved(source, "demo");
+  assert.deepEqual(semanticFunctionProblems(fn, contract), [], "the awaited record keeps its layout");
+  assert.match(printSemanticFunction(fn), /Promise\.await\.value \[arg\[ref<any>\]/);
+  assert.match(printSemanticFunction(fn), /load_field\[f64\] local\[ref<Result/, "the field is read at its declared type");
+});
+
 test("a void callback's concise body runs a value-returning call", () => {
   // The compiler's own frontend hands `(name) => called.add(name)` to a walk
   // that takes a void callback. The arrow is void, but the call its concise
