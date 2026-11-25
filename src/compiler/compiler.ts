@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
+import { existsSync, readFileSync, writeFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -2313,7 +2313,7 @@ export async function runBuild(
     // only the units it regenerates, so a program is never half rebuilt.
     const generatedByFunction = new Map<string, UnitGeneration>();
     /** Write one function's full result beside its artifacts and keep only its address. */
-    const spoolResult = async (workspace: CodegenWorkspace, result: CodegenResult): Promise<string> => {
+    const spoolResult = (workspace: CodegenWorkspace, result: CodegenResult): string => {
       const file = join(String(fieldOf(workspace, "workDirectory")), "generation.json");
       const stored = {
         candidates: result.candidates,
@@ -2322,7 +2322,7 @@ export async function runBuild(
         benchmarkVector: result.benchmarkVector,
         modelDurationNs: String(result.modelDurationNs),
       };
-      await writeFile(file, JSON.stringify(stored), "utf8");
+      writeFileSync(file, JSON.stringify(stored), "utf8");
       return file;
     };
     const unitsGenerated = (): UnitGeneration[] =>
@@ -2386,7 +2386,7 @@ export async function runBuild(
         // writes over the object this build is about to link.
         written.set(functionName, sequenceStart + candidates.length);
         reusedByFunction.set(key, String(fieldOf(reuseEntry, "selected")));
-        const file = await spoolResult(workspace, result as CodegenResult);
+        const file = spoolResult(workspace, result as CodegenResult);
         generatedByFunction.set(artifactKey, unitGenerationOf(unit as CompilationUnit, file, result as CodegenResult));
         return;
       }
@@ -2495,7 +2495,7 @@ export async function runBuild(
       });
       written.set(functionName, sequenceStart + ((result as unknown as Record<string, unknown>)["candidates"] as Candidate[]).length);
       reusedByFunction.delete(key);
-      const file = await spoolResult(workspace, result);
+      const file = spoolResult(workspace, result);
       generatedByFunction.set(artifactKey, unitGenerationOf(unit, file, result));
 
       // A function is proved by its own vectors, or by the program it is
