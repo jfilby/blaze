@@ -938,6 +938,33 @@ test("a wide value beside a machine-word field reads as its low limb", () => {
   }
 });
 
+test("an async arrow carries its text payload beside a promise handle", () => {
+  // An async arrow is lifted like any other closure. Its own signature must
+  // still answer the promise handle, with the text payload beside the contract;
+  // otherwise a caller's await hands the text to Promise.await.value, which
+  // takes the handle, and the validator refuses the function.
+  const source = [
+    "export async function demo(flag: boolean): Promise<string | undefined> {",
+    "  const maybe = async (): Promise<string | undefined> => flag ? `x` : undefined;",
+    "  const value = await maybe();",
+    "  return value;",
+    "}",
+    "main();",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "1.ts": source }, "1.ts");
+  const semantics = semanticsOf(phase);
+  const lifted = Object.entries(semantics).find(([name]) => name.startsWith("__closure_"));
+  assert.ok(lifted !== undefined, "the async arrow was lifted");
+  const [name] = lifted as [string, ReturnType<typeof semanticsOf>[string]];
+  const contract = phase.program.files[0].functions[name];
+  assert.equal(contract.function.returns, "ref<any>", "the arrow answers a promise handle");
+  assert.equal(contract.promise, "text", "the text payload travels beside it");
+  const demo = semantics["demo"];
+  const demoContract = phase.program.files[0].functions["demo"];
+  assert.deepEqual(semanticFunctionProblems(demo, demoContract), [], "await reads the handle as text");
+  assert.match(printSemanticFunction(demo), /Promise\.await\.text \[arg\[ref<any>\] \[call\[ref<any>\]/, "the await takes the closure's handle");
+});
+
 test("a void callback's concise body runs a value-returning call", () => {
   // The compiler's own frontend hands `(name) => called.add(name)` to a walk
   // that takes a void callback. The arrow is void, but the call its concise

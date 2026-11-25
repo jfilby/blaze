@@ -102,25 +102,24 @@ program reads (`blaze_rt_host_arguments_set`, `blaze_rt_host_argument_count`,
 `blaze_rt_host_argument`), and `stdoutWrite` writes the output stream the way
 `process.stderr.write` writes the error stream.
 
-### Known frontend limitation: awaiting a text result
+### Async text results
 
-The frontend currently mis-lowers `await` on an async function whose payload is
-text (including `Promise<string | undefined>`). It emits
-`Promise.await.value` with the text-typed result itself instead of the promise
-handle, and the IR validator refuses the call:
+An async arrow is lifted like any other closure, but its own signature must
+still answer the promise handle, with the payload type beside the contract.
+The frontend used to give the lifted arrow the payload type as its return type
+and no `promise` field. A caller's `await` then handed the text itself to
+`Promise.await.value`, which takes the handle, and the IR validator refused:
 
 ```text
 argument 1 of Promise.await.value is passed as a text and is taken as a ref<any>
 ```
 
-Async functions returning records or nothing do not hit this shape. The
-self-build's result-spooling helpers therefore read local files synchronously:
-the path and the parsed result are available immediately, and avoiding the
-async-text await keeps the compiler's own sources inside the subset. A complete
-fix belongs in the frontend/IR lowering: carry the promise handle separately
-from its payload type, so `await` reads the handle and answers the text payload.
-`test/self-host-ir.test.ts` is the gate that catches a recurrence in compiler
-source.
+`readArrow` now passes its async flag into `liftArrow`; the lifted function is
+marked async and registered as a promise function, so its contract answers
+`ref<any>` and carries the text payload beside it. The caller lowers to
+`Promise.await.text` over the closure's handle. `test/self-build-regressions.test.ts`
+holds the lifted signature and the awaited call; `test/self-host-ir.test.ts` is
+the gate that catches a recurrence in compiler source.
 
 ### The runtime ABI
 

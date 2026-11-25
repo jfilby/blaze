@@ -16400,7 +16400,7 @@ class TypeScriptParser {
     captures.captures = captures.captures.filter(
       (capture) => !arrowParams.some((param) => param.name === capture) && findDeclaration(body, capture) === null,
     );
-    const binding = this.liftArrow(liftedName, arrowParams, returns, body, captures.captures, line);
+    const binding = this.liftArrow(liftedName, arrowParams, returns, body, captures.captures, line, isAsync);
     // An arrow a declaration binds calls itself by the name it was written
     // under, and the function it became takes the values it captured in front
     // of its own. The calls were read before the values were known — and a box
@@ -16899,6 +16899,7 @@ class TypeScriptParser {
     body: Statement[],
     captures: readonly string[],
     line: number,
+    isAsync: boolean,
   ): ArrowBinding {
     const captureTypes = captures.map((capture) => {
       const type = this.boxTypeOf(capture) ?? this.valueTypes.get(capture) ?? ANY_TYPE;
@@ -16928,6 +16929,10 @@ class TypeScriptParser {
       written: written.length,
       scopeNames: this.scopeSnapshot(),
     };
+    if (isAsync) {
+      lifted.async = true;
+      this.promiseFunctions.add(name);
+    }
     // A speculative read may have lifted the same name before it was restored;
     // the closure the file finally holds is the one read last, and the stale
     // body must not answer for the contract the new parameters describe.
