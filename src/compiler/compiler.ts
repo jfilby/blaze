@@ -2462,6 +2462,7 @@ export async function runBuild(
           : {}),
         generation,
         test,
+        verifyCandidates: inputFields["verifyCandidates"] !== false,
         benchmark: benchmarkConfig,
         prepareRuntime,
         workspace,
@@ -2939,11 +2940,15 @@ export async function runBuild(
       }
       const verificationFields = outcome["verification"] as unknown as Record<string, unknown>;
       const benchmarkFields = outcome["benchmark"] as Record<string, unknown> | undefined;
-      reporter(
-        "verify",
-        "ok",
-        `Correctness verified for ${functionName} (${String(verificationFields["cases"])} test vectors, tolerance ${verificationFields["tolerance"] === undefined ? "exact" : String(verificationFields["tolerance"])})`,
-      );
+      if (verificationFields["skipped"] === true) {
+        reporter("verify", "info", `Candidate verification skipped for ${functionName} by project setting`);
+      } else {
+        reporter(
+          "verify",
+          "ok",
+          `Correctness verified for ${functionName} (${String(verificationFields["cases"])} test vectors, tolerance ${verificationFields["tolerance"] === undefined ? "exact" : String(verificationFields["tolerance"])})`,
+        );
+      }
       reporter(
         "benchmark",
         "ok",
@@ -3265,6 +3270,7 @@ export async function runStored(
       target,
       output,
       lowering,
+      verifyCandidates: true,
       runtime,
       candidate,
       workspace,

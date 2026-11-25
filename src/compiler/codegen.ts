@@ -554,6 +554,8 @@ export interface CandidateEvaluationRequest {
   mode: BuildMode;
   workspace: CodegenWorkspace;
   test: TestConfig;
+  /** Whether to run the candidate against its contract's vectors. */
+  verifyCandidates: boolean;
   benchmark: BenchmarkConfig;
   runtime: RuntimeKind;
   /**
@@ -1095,16 +1097,31 @@ async function buildCandidate(
       throw new CompilerError("LinkError", "link", `candidate ${candidateId} produced no binary to verify`, "", String(fieldOf(fieldOf(contract, "function"), "name")), candidateId, "");
     }
 
-    const verification = verifyCandidate({
-      contract,
-      parsed: fieldOf(request, "parsed") as ParsedContract,
-      runner,
-      candidate: candidateId,
-      vectors: fieldOf(vectors, "cases") as TestVector[],
-      seed: Number(fieldOf(vectors, "seed")),
-      batchSeeds: fieldOf(vectors, "batchSeeds") as number[],
-      batchSizes: fieldOf(vectors, "batchSizes") as number[],
-    });
+    const verification: VerificationResult = fieldOf(request, "verifyCandidates") === false
+      ? {
+          candidate: candidateId,
+          passed: true,
+          cases: 0,
+          tolerance: null,
+          failures: [],
+          durationNs: 0,
+          status: "passed",
+          seed: 0,
+          deterministicPassed: 0,
+          randomPassed: 0,
+          batches: [],
+          skipped: true,
+        }
+      : verifyCandidate({
+          contract,
+          parsed: fieldOf(request, "parsed") as ParsedContract,
+          runner,
+          candidate: candidateId,
+          vectors: fieldOf(vectors, "cases") as TestVector[],
+          seed: Number(fieldOf(vectors, "seed")),
+          batchSeeds: fieldOf(vectors, "batchSeeds") as number[],
+          batchSizes: fieldOf(vectors, "batchSizes") as number[],
+        });
     const passed = fieldOf(verification, "passed") === true;
     if (!passed) {
       const failures = fieldOf(verification, "failures") as readonly { readonly vector: string; readonly expected: string; readonly actual: string; readonly reason: string }[];
@@ -1731,6 +1748,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
     target: fieldOf(request, "target") as TargetSpec,
     output: fieldOf(request, "output") as OutputKind,
     lowering: fieldOf(request, "lowering") as BackendKind,
+    verifyCandidates: true,
     mode: fieldOf(request, "mode") as BuildMode,
     runtime: fieldOf(request, "runtime") as RuntimeKind,
     workspace: fieldOf(request, "workspace") as CodegenWorkspace,

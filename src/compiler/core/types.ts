@@ -515,6 +515,13 @@ export interface SourceInput {
    * ones that set this.
    */
   verifyProgram?: boolean;
+  /**
+   * Whether each candidate is run against its contract's vectors. It is by
+   * default; a self-build may turn it off because every function has already
+   * passed the IR validator and the program itself is not an oracle for the
+   * compiler's behaviour.
+   */
+  verifyCandidates?: boolean;
   /** What lowers the IR. Absent when the output kind implies it. */
   backend?: BackendKind;
   /**
@@ -654,6 +661,8 @@ export interface VerificationResult {
   randomPassed: number;
   /** One entry per independent randomized batch. */
   batches: readonly VerificationBatch[];
+  /** The build was asked to trust the validated IR instead of running vectors. */
+  skipped?: boolean;
 }
 
 /**

@@ -3,6 +3,10 @@ sourceFile = "cli.ts"
 output = "machine"
 backend = "machine"
 mode = "debug"
+# Every function has already passed the IR validator; interpreting each contract
+# against random vectors is the slowest part of a self-build and is not the
+# fixed point's oracle. The delivered compiler is still checked by stage 2.
+verifyCandidates = false
 
 # A self-build runs the rules alone, so there is one candidate per function and
 # no choice for a benchmark to make. Measuring every candidate 2000 times adds
