@@ -275,6 +275,7 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
   return {
     cwd: hostCwd(),
     reuse: values.reuse ? true : false,
+    retainRecords: false,
     ...(recompile ? { recompile: true } : {}),
     confirm: terminalConfirm,
     // What is left on the command line after the command and the project is

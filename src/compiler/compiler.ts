@@ -286,6 +286,8 @@ export interface BuildOptions {
    * different inputs is asked for again.
    */
   recompile?: boolean;
+  /** Keep every candidate and outcome in the returned API value. The CLI writes them to disk and does not need a second copy. */
+  retainRecords?: boolean;
   /** Extra model requests one attempt may spend on an answer with no implementation. */
   maxRetries?: number;
   /**
@@ -1858,6 +1860,7 @@ export async function runBuild(
   mode: "build" | "generate",
 ): Promise<BuildOutcome> {
   const fields = options as unknown as Record<string, unknown>;
+  const retainRecords = fields["retainRecords"] !== false;
   const store = createJsonStore(join(String(fields["cwd"]), STATE_DIRECTORY));
   const absoluteInput = resolveFrom(String(fields["cwd"]), inputPath);
   const id = projectIdFor(absoluteInput);
@@ -2909,16 +2912,18 @@ export async function runBuild(
       const key = unitNameKey(unit, units);
       const outcomes = result.outcomes;
       const selectedCandidate = String(result.selected);
-      candidateEntries.push([key, result.candidates]);
-      outcomeEntries.push([key, outcomes]);
-      verificationEntries.push([
-        key,
-        outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined),
-      ]);
-      benchmarkEntries.push([
-        key,
-        outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined),
-      ]);
+      if (retainRecords) {
+        candidateEntries.push([key, result.candidates]);
+        outcomeEntries.push([key, outcomes]);
+        verificationEntries.push([
+          key,
+          outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined),
+        ]);
+        benchmarkEntries.push([
+          key,
+          outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined),
+        ]);
+      }
       const outcome = outcomes.find((one) => String(one["candidate"]) === selectedCandidate);
       if (reusedByFunction.has(key)) {
         reporter(
@@ -3063,7 +3068,7 @@ export async function runBuild(
 
     const generationRecord = generationRecordOf(
       selected,
-      outcomes,
+      retainRecords ? outcomes : {},
       String(
         generated.reduce((total: number, entry) => total + Number(entry.modelDurationNs), 0),
       ),
