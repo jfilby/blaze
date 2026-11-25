@@ -1120,8 +1120,8 @@ function unitGenerationOf(unit: CompilationUnit, file: string, result: CodegenRe
 }
 
 /** Read one spooled result back, one function at a time. */
-async function readUnitGeneration(entry: UnitGeneration): Promise<CodegenResult> {
-  const stored = JSON.parse(await readFile(entry.file, "utf8")) as Record<string, unknown>;
+function readUnitGeneration(entry: UnitGeneration): CodegenResult {
+  const stored = JSON.parse(readFileSync(entry.file, "utf8")) as Record<string, unknown>;
   return {
     candidates: stored["candidates"] as Candidate[],
     outcomes: stored["outcomes"] as CandidateOutcome[],
@@ -2334,10 +2334,10 @@ export async function runBuild(
     const written = new Map<string, number>();
 
     /** The implementation a unit contributed to the program that mismatched. */
-    const implementationOf = async (key: string): Promise<string | undefined> => {
+    const implementationOf = (key: string): string | undefined => {
       const entry = generatedByFunction.get(key);
       if (entry === undefined) return undefined;
-      const result = await readUnitGeneration(entry);
+      const result = readUnitGeneration(entry);
       if (result.selected === null) return undefined;
       const chosen = result.candidates.find((candidate) => String(fieldOf(candidate, "id")) === String(result.selected));
       return chosen === undefined ? undefined : String(fieldOf(chosen, "text"));
@@ -2356,7 +2356,7 @@ export async function runBuild(
       const artifactKey = unitKey(unit);
       const functionName = String(contractFunction(unitContract(unit))["name"]);
       const unitContractValue = unitContract(unit) as unknown as FunctionContract;
-      const previous = mismatch === undefined ? undefined : await implementationOf(key);
+      const previous = mismatch === undefined ? undefined : implementationOf(key);
       if (mismatch !== undefined && (((unitContractValue as unknown as Record<string, unknown>)["ensures"] as string[]).length > 0 || previous === undefined)) return;
       const workspace = { workDirectory: `${base}/${artifactKey}`, functionName };
       await mkdir(workspace.workDirectory, { recursive: true });
@@ -2599,7 +2599,7 @@ export async function runBuild(
       const selectedValues: Record<string, string> = Object.create(null) as Record<string, string>;
       for (const entry of generated) {
         const unit = entry.unit;
-        const result = await readUnitGeneration(entry);
+        const result = readUnitGeneration(entry);
         const functionName = String(contractFunction(unitContract(unit))["name"]);
         const key = unitNameKey(unit, units);
         const outcomes = result.outcomes;
@@ -2633,17 +2633,17 @@ export async function runBuild(
       const generationEntries: [string, () => Promise<unknown>][] = [];
       for (const entry of generated) {
         const key = unitNameKey(entry.unit, units);
-        candidateEntries.push([key, async () => (await readUnitGeneration(entry)).candidates]);
+        candidateEntries.push([key, async () => (readUnitGeneration(entry)).candidates]);
         verificationEntries.push([key, async () => {
-          const outcomes = (await readUnitGeneration(entry)).outcomes;
+          const outcomes = (readUnitGeneration(entry)).outcomes;
           return outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined);
         }]);
         benchmarkEntries.push([key, async () => {
-          const outcomes = (await readUnitGeneration(entry)).outcomes;
+          const outcomes = (readUnitGeneration(entry)).outcomes;
           return outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined);
         }]);
         generationEntries.push([key, async () => {
-          const result = await readUnitGeneration(entry);
+          const result = readUnitGeneration(entry);
           const generationValue: Record<string, unknown> = {};
           for (const name of Object.keys(result)) {
             const value = (result as unknown as Record<string, unknown>)[name];
@@ -2745,7 +2745,7 @@ export async function runBuild(
       }
       if (driverEntry !== undefined && programIsParallel(driverEntry, driverBodies)) threads.push("openmp");
       for (const entry of unitsGenerated()) {
-        const result = await readUnitGeneration(entry);
+        const result = readUnitGeneration(entry);
         const selected = result.selected;
         if (selected === null) continue;
         const outcomes = result.outcomes as unknown as Record<string, unknown>[];
@@ -2836,10 +2836,10 @@ export async function runBuild(
       // return to an earlier program is detected rather than spent again.
       mismatch = checkedFields["difference"] as ProgramMismatch | undefined;
       const state: RepairState = {
-        implementations: byName(await Promise.all(units.map(async (unit): Promise<[string, string]> => [
+        implementations: byName(units.map((unit): [string, string] => [
           unitNameKey(unit, units),
-          await implementationOf(unitKey(unit)) ?? "",
-        ]))),
+          implementationOf(unitKey(unit)) ?? "",
+        ])),
         mismatch: mismatch === undefined ? undefined : `${String(mismatch.line)}:${String(mismatch.expected)}:${String(mismatch.actual)}:${String(mismatch.failure ?? "")}`,
       };
       const decision = convergence.observe(state, false);
@@ -2906,7 +2906,7 @@ export async function runBuild(
     const outcomeEntries: (readonly [string, CandidateOutcome[]])[] = [];
     for (const entry of generated) {
       const unit = entry.unit;
-      const result = await readUnitGeneration(entry);
+      const result = readUnitGeneration(entry);
       const functionName = String(contractFunction(unitContract(unit))["name"]);
       const key = unitNameKey(unit, units);
       const outcomes = result.outcomes;
