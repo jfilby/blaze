@@ -91,7 +91,7 @@ import {
   type PreparedRuntime,
 } from "./codegen.ts";
 import { CompilerError, isCompilerError, toCompilerError } from "./core/errors.ts";
-import { createJsonStore, flushToDisk, hashText, hashValue, type JsonStore, storeResolve, storeWrite, storeExists, storeRemove, storeMkdirp, storeRead, storeReadIfValid } from "./core/json-store.ts";
+import { createJsonStore, flushToDisk, hashText, hashValue, type JsonStore, storeResolve, storeWrite, storeWriteEntries, storeExists, storeRemove, storeMkdirp, storeRead, storeReadIfValid } from "./core/json-store.ts";
 import { compactContract, expandContract } from "./core/contract-store.ts";
 import { byName } from "./core/named-record.ts";
 import { frontendFor } from "./semantics/frontend.ts";
@@ -1103,15 +1103,30 @@ function semanticFunctions(
   return { functions: resolved, driver };
 }
 
-/** What generation produced for one function of a build. */
+/** What generation produced for one function of a build, after its full result was spooled. */
 interface UnitGeneration {
   unit: CompilationUnit;
-  result: CodegenResult;
+  /** The file that holds the candidates, outcomes and benchmark vector. */
+  file: string;
+  selected: string | null;
+  modelDurationNs: bigint;
 }
 
-/** A unit and what it generated, with the fields they are held by. */
-function unitGenerationOf(unit: CompilationUnit, result: CodegenResult): UnitGeneration {
-  return { unit, result };
+/** A unit and the file its result was written to, with the fields they are held by. */
+function unitGenerationOf(unit: CompilationUnit, file: string, result: CodegenResult): UnitGeneration {
+  return { unit, file, selected: result.selected, modelDurationNs: result.modelDurationNs };
+}
+
+/** Read one spooled result back, one function at a time. */
+async function readUnitGeneration(entry: UnitGeneration): Promise<CodegenResult> {
+  const stored = JSON.parse(await readFile(entry.file, "utf8")) as Record<string, unknown>;
+  return {
+    candidates: stored["candidates"] as Candidate[],
+    outcomes: stored["outcomes"] as CandidateOutcome[],
+    selected: stored["selected"] as string | null,
+    benchmarkVector: stored["benchmarkVector"] as TestVector | null,
+    modelDurationNs: BigInt(String(stored["modelDurationNs"])),
+  };
 }
 
 /**
@@ -2249,6 +2264,8 @@ export async function runBuild(
      * it does rather than what it returns.
      */
     const awaitingProgram = new Map<string, IncrementalEntry>();
+    /** Recompile entries spooled beside their artifacts instead of retained in the heap. */
+    const spooledIncremental = new Map<string, string>();
     /**
      * Every function of the program, by the name the source gave it. The
      * outline has already decided, for each call, whether it is made or
@@ -2266,6 +2283,16 @@ export async function runBuild(
      * program no longer compiles.
      */
     const prove = async (): Promise<void> => {
+      if (discardStored) {
+        const entries: [string, () => Promise<unknown>][] = [];
+        for (const unit of units) {
+          const key = unitNameKey(unit, units);
+          const file = spooledIncremental.get(key);
+          if (file !== undefined) entries.push([key, async () => JSON.parse(await readFile(file, "utf8")) as unknown]);
+        }
+        await storeWriteEntries(store, String(fieldOf(paths, "incremental")), entries);
+        return;
+      }
       // Keyed by whatever the source named the function, and `__proto__` is a
       // legal name: on an object with the usual prototype, assigning to it
       // replaces the prototype instead of adding an entry, and the record
@@ -2282,6 +2309,19 @@ export async function runBuild(
     // What a round of generation produced, by function. A repair round replaces
     // only the units it regenerates, so a program is never half rebuilt.
     const generatedByFunction = new Map<string, UnitGeneration>();
+    /** Write one function's full result beside its artifacts and keep only its address. */
+    const spoolResult = async (workspace: CodegenWorkspace, result: CodegenResult): Promise<string> => {
+      const file = join(String(fieldOf(workspace, "workDirectory")), "generation.json");
+      const stored = {
+        candidates: result.candidates,
+        outcomes: result.outcomes,
+        selected: result.selected,
+        benchmarkVector: result.benchmarkVector,
+        modelDurationNs: String(result.modelDurationNs),
+      };
+      await writeFile(file, JSON.stringify(stored), "utf8");
+      return file;
+    };
     const unitsGenerated = (): UnitGeneration[] =>
       units.flatMap((unit) => {
         const entry = generatedByFunction.get(unitKey(unit));
@@ -2291,16 +2331,13 @@ export async function runBuild(
     const written = new Map<string, number>();
 
     /** The implementation a unit contributed to the program that mismatched. */
-    const implementationOf = (key: string): string | undefined => {
+    const implementationOf = async (key: string): Promise<string | undefined> => {
       const entry = generatedByFunction.get(key);
       if (entry === undefined) return undefined;
-      const entryFields = entry as unknown as Record<string, unknown>;
-      const result = entryFields["result"] as Record<string, unknown>;
-      const selected = result["selected"];
-      if (selected === null || selected === undefined) return undefined;
-      const candidates = result["candidates"] as Record<string, unknown>[];
-      const chosen = candidates.find((candidate) => String(candidate["id"]) === String(selected));
-      return chosen === undefined ? undefined : String(chosen["text"]);
+      const result = await readUnitGeneration(entry);
+      if (result.selected === null) return undefined;
+      const chosen = result.candidates.find((candidate) => String(fieldOf(candidate, "id")) === String(result.selected));
+      return chosen === undefined ? undefined : String(fieldOf(chosen, "text"));
     };
 
     /**
@@ -2316,7 +2353,7 @@ export async function runBuild(
       const artifactKey = unitKey(unit);
       const functionName = String(contractFunction(unitContract(unit))["name"]);
       const unitContractValue = unitContract(unit) as unknown as FunctionContract;
-      const previous = mismatch === undefined ? undefined : implementationOf(key);
+      const previous = mismatch === undefined ? undefined : await implementationOf(key);
       if (mismatch !== undefined && (((unitContractValue as unknown as Record<string, unknown>)["ensures"] as string[]).length > 0 || previous === undefined)) return;
       const workspace = { workDirectory: `${base}/${artifactKey}`, functionName };
       await mkdir(workspace.workDirectory, { recursive: true });
@@ -2346,7 +2383,8 @@ export async function runBuild(
         // writes over the object this build is about to link.
         written.set(functionName, sequenceStart + candidates.length);
         reusedByFunction.set(key, String(fieldOf(reuseEntry, "selected")));
-        generatedByFunction.set(artifactKey, unitGenerationOf(unit as CompilationUnit, result as CodegenResult));
+        const file = await spoolResult(workspace, result as CodegenResult);
+        generatedByFunction.set(artifactKey, unitGenerationOf(unit as CompilationUnit, file, result as CodegenResult));
         return;
       }
 
@@ -2454,7 +2492,8 @@ export async function runBuild(
       });
       written.set(functionName, sequenceStart + ((result as unknown as Record<string, unknown>)["candidates"] as Candidate[]).length);
       reusedByFunction.delete(key);
-      generatedByFunction.set(artifactKey, unitGenerationOf(unit as CompilationUnit, result as CodegenResult));
+      const file = await spoolResult(workspace, result);
+      generatedByFunction.set(artifactKey, unitGenerationOf(unit, file, result));
 
       // A function is proved by its own vectors, or by the program it is
       // part of, so an entry is only written once something has said so.
@@ -2474,25 +2513,37 @@ export async function runBuild(
       const selectedOutcome = resultOutcomes.find((outcome) => String(outcome["candidate"]) === String(selected));
       const verified = selectedOutcome !== undefined && selectedOutcome["verification"] !== undefined;
       if (verified) {
-        incremental[key] = entry;
-        // The record is a whole file that every function adds itself to, so
-        // two functions finishing together would each read the record before
-        // the other wrote it, and one entry would be lost. One writer at a
-        // time costs nothing: this is a write of a few kilobytes, and the
-        // functions it is waiting for are still waiting on a model.
-        const writeIncremental = (): Promise<void> => storeWrite(store, String(fieldOf(paths, "incremental")), { ...incremental });
-        const writeNext = writing.then(writeIncremental, writeIncremental);
-        writing = writeNext.then(
-          () => {
-            return;
-          },
-          () => {
-            return;
-          },
-        );
-        await writeNext;
+        if (discardStored) {
+          const file = join(workspace.workDirectory, "incremental.json");
+          await writeFile(file, JSON.stringify(entry), "utf8");
+          spooledIncremental.set(key, file);
+        } else {
+          incremental[key] = entry;
+          // The record is a whole file that every function adds itself to, so
+          // two functions finishing together would each read the record before
+          // the other wrote it, and one entry would be lost. One writer at a
+          // time costs nothing: this is a write of a few kilobytes, and the
+          // functions it is waiting for are still waiting on a model.
+          const writeIncremental = (): Promise<void> => storeWrite(store, String(fieldOf(paths, "incremental")), { ...incremental });
+          const writeNext = writing.then(writeIncremental, writeIncremental);
+          writing = writeNext.then(
+            () => {
+              return;
+            },
+            () => {
+              return;
+            },
+          );
+          await writeNext;
+        }
       } else if (checksProgram) {
-        awaitingProgram.set(key, entry);
+        if (discardStored) {
+          const file = join(workspace.workDirectory, "incremental.json");
+          await writeFile(file, JSON.stringify(entry), "utf8");
+          spooledIncremental.set(key, file);
+        } else {
+          awaitingProgram.set(key, entry);
+        }
       }
     };
 
@@ -2542,29 +2593,20 @@ export async function runBuild(
       // Keyed by whatever the source named the function, so these are built
       // from entries rather than assigned into: a function called `__proto__`
       // would otherwise replace the prototype of the record instead of adding
-      // an entry, and the record this build writes out would be missing it.
-      const candidateValues: Record<string, Candidate[]> = Object.create(null) as Record<string, Candidate[]>;
-      const verificationValues: Record<string, VerificationResult[]> = Object.create(null) as Record<string, VerificationResult[]>;
-      const benchmarkValues: Record<string, BenchmarkResult[]> = Object.create(null) as Record<string, BenchmarkResult[]>;
       const selectedValues: Record<string, string> = Object.create(null) as Record<string, string>;
-      const generationFunctions: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
       for (const entry of generated) {
-        const entryFields = entry as unknown as Record<string, unknown>;
-        const unit = entryFields["unit"] as CompilationUnit;
-        const resultFields = entryFields["result"] as Record<string, unknown>;
+        const unit = entry.unit;
+        const result = await readUnitGeneration(entry);
         const functionName = String(contractFunction(unitContract(unit))["name"]);
         const key = unitNameKey(unit, units);
-        const outcomes = resultFields["outcomes"] as Record<string, unknown>[];
-        candidateValues[key] = resultFields["candidates"] as Candidate[];
-        verificationValues[key] = outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined);
-        benchmarkValues[key] = outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined);
+        const outcomes = result.outcomes;
         const valid = outcomes.filter((outcome) => outcome["valid"] as boolean).length;
         reporter(
           "review",
           valid > 0 ? "ok" : "fail",
-          `${implementationLabel(outputKind)} for ${functionName}: ${(resultFields["candidates"] as unknown[]).length} candidate(s), ${valid} valid`,
+          `${implementationLabel(outputKind)} for ${functionName}: ${result.candidates.length} candidate(s), ${valid} valid`,
         );
-        if (resultFields["selected"] === null) {
+        if (result.selected === null) {
           const detail = outcomes
             .map((outcome) => {
               const failure = outcome["failure"] as Record<string, unknown> | undefined;
@@ -2575,34 +2617,55 @@ export async function runBuild(
             .join("\n");
           throw new CompilerError("VerificationError", "verify", `no candidate for ${functionName} satisfied the contract`, detail.trim(), functionName, "", "");
         }
-        selectedValues[key] = String(resultFields["selected"]);
-        const generationValue: Record<string, unknown> = {};
-        for (const name of Object.keys(resultFields)) {
-          const value = resultFields[name];
-          generationValue[name] = typeof value === "bigint" ? String(value) : value;
-        }
-        generationFunctions[key] = generationValue;
+        selectedValues[key] = String(result.selected);
       }
-      // The maps above are built fresh for this round and nothing writes to
-      // them after it. A store write serialises before it returns, so the file
-      // is already a snapshot of the round: copying each map with a stringify
-      // and a parse only to stringify it again on the way to disk cost five
-      // whole-tree copies per round and bought no isolation.
-      await storeWrite(store, candidatesPath, candidateValues);
-      await storeWrite(store, generationPath, {
-        model: String((build as unknown as Record<string, unknown>)["model"]),
-        modelConfig: String((build as unknown as Record<string, unknown>)["modelConfig"]),
-        compilerVersion: COMPILER_VERSION,
-        functions: generationFunctions,
-        modelDurationNs: String(
-          generated.reduce((total: number, entry) => {
-            const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
-            return total + Number(resultFields["modelDurationNs"]);
-          }, 0),
-        ),
-      });
-      await storeWrite(store, verificationPath, verificationValues);
-      await storeWrite(store, benchmarkPath, benchmarkValues);
+
+      // Each record is loaded from its spooled result only while that entry is
+      // written. The alternatives — every candidate, outcome and verification
+      // live until the end — exhaust the heap on a build of the compiler long
+      // before its last function is generated.
+      const candidateEntries: [string, () => Promise<unknown>][] = [];
+      const verificationEntries: [string, () => Promise<unknown>][] = [];
+      const benchmarkEntries: [string, () => Promise<unknown>][] = [];
+      const generationEntries: [string, () => Promise<unknown>][] = [];
+      for (const entry of generated) {
+        const key = unitNameKey(entry.unit, units);
+        candidateEntries.push([key, async () => (await readUnitGeneration(entry)).candidates]);
+        verificationEntries.push([key, async () => {
+          const outcomes = (await readUnitGeneration(entry)).outcomes;
+          return outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined);
+        }]);
+        benchmarkEntries.push([key, async () => {
+          const outcomes = (await readUnitGeneration(entry)).outcomes;
+          return outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined);
+        }]);
+        generationEntries.push([key, async () => {
+          const result = await readUnitGeneration(entry);
+          const generationValue: Record<string, unknown> = {};
+          for (const name of Object.keys(result)) {
+            const value = (result as unknown as Record<string, unknown>)[name];
+            generationValue[name] = typeof value === "bigint" ? String(value) : value;
+          }
+          return generationValue;
+        }]);
+      }
+      await storeWriteEntries(store, candidatesPath, candidateEntries);
+      await storeWriteEntries(
+        store,
+        generationPath,
+        generationEntries,
+        {
+          model: String((build as unknown as Record<string, unknown>)["model"]),
+          modelConfig: String((build as unknown as Record<string, unknown>)["modelConfig"]),
+          compilerVersion: COMPILER_VERSION,
+        },
+        {
+          modelDurationNs: String(generated.reduce((total: number, entry) => total + Number(entry.modelDurationNs), 0)),
+        },
+        "functions",
+      );
+      await storeWriteEntries(store, verificationPath, verificationEntries);
+      await storeWriteEntries(store, benchmarkPath, benchmarkEntries);
       // The map is built without a prototype so a function named `__proto__`
       // is an entry rather than a prototype write. The caller's record is an
       // ordinary object; copying the entries out keeps that distinction from
@@ -2640,12 +2703,9 @@ export async function runBuild(
       selected = await record();
       if (driver === undefined || programFile === undefined || String(mode) !== "build") break;
       const runtime = await (prepareRuntime as unknown as (capture: undefined) => Promise<PreparedRuntime | undefined>)(undefined);
-      const objectPaths = unitsGenerated().map((entry) => {
-        const entryFields = entry as unknown as Record<string, unknown>;
-        const unit = entryFields["unit"] as CompilationUnit;
-        const result = entryFields["result"] as Record<string, unknown>;
-        return join(join(base, unitKey(unit)), `${String(result["selected"])}.o`);
-      });
+      const objectPaths = unitsGenerated().map((entry) =>
+        join(join(base, unitKey(entry.unit)), `${String(entry.selected)}.o`),
+      );
       // `-fopenmp` is asked for when an object of the program carries a loop the
       // compiler proved its turns independent: the C backend writes that loop as
       // a pragma and only the OpenMP runtime serves it, so an object with one in
@@ -2683,11 +2743,10 @@ export async function runBuild(
       }
       if (driverEntry !== undefined && programIsParallel(driverEntry, driverBodies)) threads.push("openmp");
       for (const entry of unitsGenerated()) {
-        const entryFields = entry as unknown as Record<string, unknown>;
-        const result = entryFields["result"] as Record<string, unknown>;
-        const selected = result["selected"];
-        if (selected === null || selected === undefined) continue;
-        const outcomes: Record<string, unknown>[] = fieldOf(result, "outcomes") as unknown as Record<string, unknown>[];
+        const result = await readUnitGeneration(entry);
+        const selected = result.selected;
+        if (selected === null) continue;
+        const outcomes = result.outcomes as unknown as Record<string, unknown>[];
         const outcome = outcomes.find((one) => String(fieldOf(one, "candidate")) === String(selected));
         const threading: string[] = outcome === undefined ? [] : fieldOf(outcome, "threads") as unknown as string[];
         for (const raw of threading) {
@@ -2775,9 +2834,10 @@ export async function runBuild(
       // return to an earlier program is detected rather than spent again.
       mismatch = checkedFields["difference"] as ProgramMismatch | undefined;
       const state: RepairState = {
-        implementations: Object.fromEntries(
-          units.map((unit) => [unitNameKey(unit, units), implementationOf(unitKey(unit)) ?? ""]),
-        ),
+        implementations: byName(await Promise.all(units.map(async (unit): Promise<[string, string]> => [
+          unitNameKey(unit, units),
+          await implementationOf(unitKey(unit)) ?? "",
+        ]))),
         mismatch: mismatch === undefined ? undefined : `${String(mismatch.line)}:${String(mismatch.expected)}:${String(mismatch.actual)}:${String(mismatch.failure ?? "")}`,
       };
       const decision = convergence.observe(state, false);
@@ -2843,15 +2903,14 @@ export async function runBuild(
     const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
     const outcomeEntries: (readonly [string, CandidateOutcome[]])[] = [];
     for (const entry of generated) {
-      const entryFields = entry as unknown as Record<string, unknown>;
-      const unit = entryFields["unit"] as CompilationUnit;
+      const unit = entry.unit;
+      const result = await readUnitGeneration(entry);
       const functionName = String(contractFunction(unitContract(unit))["name"]);
       const key = unitNameKey(unit, units);
-      const resultFields = entryFields["result"] as Record<string, unknown>;
-      const outcomes = resultFields["outcomes"] as Record<string, unknown>[];
-      const selectedCandidate = String(resultFields["selected"]);
-      candidateEntries.push([key, resultFields["candidates"] as Candidate[]]);
-      outcomeEntries.push([key, outcomes as unknown as CandidateOutcome[]]);
+      const outcomes = result.outcomes;
+      const selectedCandidate = String(result.selected);
+      candidateEntries.push([key, result.candidates]);
+      outcomeEntries.push([key, outcomes]);
       verificationEntries.push([
         key,
         outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined),
@@ -2874,7 +2933,7 @@ export async function runBuild(
         reporter("verify", "info", `${functionName} returns no value to verify, so the program it is part of is what checks it`);
         continue;
       }
-      const verificationFields = outcome["verification"] as Record<string, unknown>;
+      const verificationFields = outcome["verification"] as unknown as Record<string, unknown>;
       const benchmarkFields = outcome["benchmark"] as Record<string, unknown> | undefined;
       reporter(
         "verify",
@@ -3006,10 +3065,7 @@ export async function runBuild(
       selected,
       outcomes,
       String(
-        generated.reduce((total: number, entry) => {
-          const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
-          return total + Number(resultFields["modelDurationNs"]);
-        }, 0),
+        generated.reduce((total: number, entry) => total + Number(entry.modelDurationNs), 0),
       ),
     );
     return buildOutcomeOf(
@@ -3131,8 +3187,7 @@ export async function runStored(
   // it holds and nothing else.
   const stored = Object.create(null) as Record<string, Candidate[]>;
   const candidatesByName = await storeRead<Record<string, Candidate[]>>(store, candidatesPath);
-  for (const name of Object.keys(candidatesByName)) {
-    const candidates = candidatesByName[name];
+  for (const [name, candidates] of Object.entries(candidatesByName)) {
     if (Array.isArray(candidates)) stored[name] = candidates;
   }
 

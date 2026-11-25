@@ -210,17 +210,33 @@ export async function storeReadIfValid<T>(store: JsonStore, relativePath: string
 }
 
 export async function storeWrite<T>(store: JsonStore, relativePath: string, value: T): Promise<void> {
+  await storeWriteChunks(store, relativePath, jsonChunks(value));
+}
+
+/**
+ * Write a JSON document from chunks that may be produced asynchronously.
+ *
+ * A build of the compiler writes thousands of candidate records. Keeping every
+ * record live until the final `storeWrite` exhausts the heap; an async producer
+ * can read one spooled result at a time while this writes the document in
+ * bounded batches, with the same temporary-file and atomic-rename guarantees
+ * as every other store write.
+ */
+export async function storeWriteChunks(
+  store: JsonStore,
+  relativePath: string,
+  chunks: Iterable<string> | AsyncIterable<string>,
+): Promise<void> {
   const file = storeResolve(store, relativePath);
   await storeMkdirp(store, dirname(relative(String(fieldOf(store, "root")), file)));
   // A build writes from several places at once, and two writes to the same
   // path would otherwise share this name: one would rename the other's
-  // temporary away and the loser would fail on a file that no longer
-  // exists.
+  // temporary away and the loser would fail on a file that no longer exists.
   const temporary = `${file}.${processId()}.${temporaryWrites++}.tmp`;
   try {
     await writeFile(temporary, "", "utf8");
     let batch = "";
-    for (const chunk of jsonChunks(value)) {
+    for await (const chunk of chunks) {
       batch += chunk;
       if (batch.length >= WRITE_BATCH_BYTES) {
         await appendFile(temporary, batch, "utf8");
@@ -228,6 +244,73 @@ export async function storeWrite<T>(store: JsonStore, relativePath: string, valu
       }
     }
     if (batch.length > 0) await appendFile(temporary, batch, "utf8");
+    await appendFile(temporary, "\n", "utf8");
+    await syncPath(temporary);
+    await rename(temporary, file);
+    await syncPath(dirname(file));
+  } catch (cause) {
+    await rm(temporary, false, true);
+    throw new CompilerError("StorageError", "storage", `cannot write ${relativePath}`, String(cause), "", "", "");
+  }
+}
+
+/**
+ * Write a JSON object whose entry values are loaded one at a time.
+ *
+ * A build of the compiler has thousands of candidate records. Keeping every
+ * value live until one final `storeWrite` exhausts the heap; a loader reads one
+ * spooled result at a time while this writes the document in bounded batches.
+ * `before` and `after` hold the fixed fields around the streamed entries, as
+ * `generation.json` needs its model and total duration around `functions`.
+ */
+export async function storeWriteEntries(
+  store: JsonStore,
+  relativePath: string,
+  entries: readonly (readonly [string, () => Promise<unknown>])[],
+  before: Record<string, unknown> = {},
+  after: Record<string, unknown> = {},
+  entriesKey?: string,
+): Promise<void> {
+  const file = storeResolve(store, relativePath);
+  await storeMkdirp(store, dirname(relative(String(fieldOf(store, "root")), file)));
+  const temporary = `${file}.${processId()}.${temporaryWrites++}.tmp`;
+  try {
+    await writeFile(temporary, "", "utf8");
+    let batch = "{\n";
+    let first = true;
+    const fixed = (fields: Record<string, unknown>): void => {
+      for (const [key, value] of Object.entries(fields)) {
+        if (!first) batch += ",\n";
+        first = false;
+        batch += `  ${JSON.stringify(key)}: `;
+        for (const chunk of jsonChunks(value)) batch += chunk;
+      }
+    };
+    fixed(before);
+    const indent = entriesKey === undefined ? "  " : "    ";
+    if (entriesKey !== undefined) {
+      if (!first) batch += ",\n";
+      first = false;
+      batch += `  ${JSON.stringify(entriesKey)}: {\n`;
+    }
+    let entriesFirst = true;
+    for (const [key, load] of entries) {
+      if (!entriesFirst) batch += ",\n";
+      entriesFirst = false;
+      batch += `${indent}${JSON.stringify(key)}: `;
+      for (const chunk of jsonChunks(await load())) batch += chunk;
+      if (batch.length >= WRITE_BATCH_BYTES) {
+        await appendFile(temporary, batch, "utf8");
+        batch = "";
+      }
+    }
+    if (entriesKey !== undefined) {
+      batch += "\n  }";
+      first = false;
+    }
+    fixed(after);
+    batch += "\n}";
+    await appendFile(temporary, batch, "utf8");
     await appendFile(temporary, "\n", "utf8");
     await syncPath(temporary);
     await rename(temporary, file);
@@ -290,7 +373,9 @@ export async function storeMkdirp(store: JsonStore, relativePath: string): Promi
 export async function storeList(store: JsonStore, relativePath: string): Promise<string[]> {
   try {
     const entries = await readdirEntries(storeResolve(store, relativePath));
-    return entries.map((entry) => String(fieldOf(entry, "name")));
+    const names: string[] = [];
+    for (const entry of entries) names.push(String(fieldOf(entry, "name")));
+    return names;
   } catch (cause) {
     // A directory nobody created is a directory with nothing in it: the
     // caller is asking what projects exist, and one that does not is none.
