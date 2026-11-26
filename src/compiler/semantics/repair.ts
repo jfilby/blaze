@@ -1419,46 +1419,74 @@ export interface Scope {
   readonly targets: Map<string, string>;
 }
 
-/** Whether a node of a walked tree is a block, which its own scope renames. */
-function isBlockNode(node: unknown): node is SemanticBlock {
-  return (
-    typeof node === "object" &&
-    node !== null &&
-    !Array.isArray(node) &&
-    "statements" in node &&
-    "terminator" in node &&
-    "releases" in node
-  );
+/** A value read in the callee, with only its value-bearing fields rewritten. */
+function substituteValue(value: SemanticValue, scope: Scope): SemanticValue {
+  switch (value.k) {
+    case "local": {
+      const bound = (fieldOf(scope, "reads") as Map<string, SemanticValue>).get(String(fieldOf(value, "name")));
+      return bound === undefined ? value : structuredClone(bound);
+    }
+    case "length":
+      return { ...value, of: substituteValue(value.of, scope) };
+    case "element": {
+      const length = value.length;
+      return {
+        ...value,
+        of: substituteValue(value.of, scope),
+        index: substituteValue(value.index, scope),
+        ...(length === undefined ? {} : { length: substituteValue(length, scope) }),
+      };
+    }
+    case "buffer": {
+      const view = value.view;
+      return {
+        ...value,
+        count: value.count === null ? null : substituteValue(value.count, scope),
+        view: view === null ? null : { of: substituteValue(view.of, scope), offset: substituteValue(view.offset, scope) },
+        values: value.values.map((one) => substituteValue(one, scope)),
+      };
+    }
+    case "newObject":
+      return { ...value, fields: value.fields.map((field) => ({ name: field.name, value: substituteValue(field.value, scope) })) };
+    case "loadField":
+      return { ...value, object: substituteValue(value.object, scope) };
+    case "call":
+      return { ...value, call: substituteCall(value.call, scope) };
+    case "arith":
+      return { ...value, left: substituteValue(value.left, scope), right: substituteValue(value.right, scope) };
+    case "compare":
+      return { ...value, left: substituteValue(value.left, scope), right: substituteValue(value.right, scope) };
+    case "logical":
+      return { ...value, left: substituteValue(value.left, scope), right: substituteValue(value.right, scope) };
+    case "coalesce":
+      return { ...value, left: substituteValue(value.left, scope), right: substituteValue(value.right, scope) };
+    case "select":
+      return {
+        ...value,
+        condition: substituteValue(value.condition, scope),
+        then: substituteValue(value.then, scope),
+        otherwise: substituteValue(value.otherwise, scope),
+      };
+    case "unary":
+      return { ...value, operand: substituteValue(value.operand, scope) };
+    case "isNull":
+      return { ...value, operand: substituteValue(value.operand, scope) };
+    case "toText":
+      return { ...value, of: substituteValue(value.of, scope) };
+    case "argv":
+      return { ...value, index: value.index === null ? null : substituteValue(value.index, scope) };
+    case "closure":
+      return { ...value, captures: value.captures.map((one) => substituteValue(one, scope)) };
+    case "capture":
+      return { ...value, closure: substituteValue(value.closure, scope) };
+    default:
+      return value;
+  }
 }
 
-/**
- * Substitutes what a walked tree reads, without entering a block of it.
- *
- * A block is renamed by the walk that carries its own scope into it, so a
- * substitution that entered one would read the names of the scope outside it
- * and rewrite the block twice — the second time over reads the first had
- * already answered, some of which the block's own declarations shadow.
- */
-function substituteShallow<T>(node: T, scope: Scope): T {
-  if (isBlockNode(node)) return node;
-  if (typeof node === "string") return ((fieldOf(scope, "targets") as Map<string, string>).get(node) ?? node) as T;
-  if (isValueNode(node) && String(fieldOf(node, "k")) === "local") {
-    const bound = (fieldOf(scope, "reads") as Map<string, SemanticValue>).get(String(fieldOf(node, "name")));
-    if (bound !== undefined) return structuredClone(bound) as T;
-  }
-  if (Array.isArray(node)) {
-    const replaced: unknown[] = [];
-    for (const entry of node) replaced[replaced.length] = substituteShallow(entry, scope);
-    return replaced as T;
-  }
-  if (node !== null && typeof node === "object") {
-    const replaced: Record<string, unknown> = {};
-    for (const [name, entry] of Object.entries(node as Record<string, unknown>)) {
-      replaced[name] = substituteShallow(entry, scope);
-    }
-    return replaced as T;
-  }
-  return node;
+/** A call's arguments are values; its symbol, signature and types are not names of the callee's scope. */
+function substituteCall(call: SemanticCall, scope: Scope): SemanticCall {
+  return { ...call, args: call.args.map((one) => substituteValue(one, scope)) };
 }
 
 /**
@@ -1470,38 +1498,64 @@ function substituteShallow<T>(node: T, scope: Scope): T {
  * one, and its own slot is written under a name of its own.
  */
 function substituteStatement(statement: SemanticStatement, scope: Scope): void {
-  if (String(fieldOf(statement, "k")) === "let") {
-    setField(statement, "value", substituteShallow(fieldOf(statement, "value") as SemanticValue, scope));
-    return;
-  }
-  if (String(fieldOf(statement, "k")) === "loop") {
-    const loop = fieldOf(statement, "loop") as SemanticLoop;
-    const kind = String(fieldOf(loop, "kind"));
-    // The loop is rewritten where it is: the tree this walks is already a copy
-    // of the callee's body, and a spread of it would read every field of a
-    // value the frontend types as `ref<any>`, which is a field no backend can
-    // pick a layout for.
-    if (kind === "counted") {
-      setField(loop, "from", substituteShallow(fieldOf(loop, "from") as SemanticValue, scope));
-      setField(loop, "to", substituteShallow(fieldOf(loop, "to") as SemanticValue, scope));
-      const step = fieldOf(loop, "step") as SemanticValue | null;
-      if (step !== null) setField(loop, "step", substituteShallow(step, scope));
-    } else if (kind === "each") {
-      setField(loop, "length", substituteShallow(fieldOf(loop, "length") as SemanticValue, scope));
-    } else {
-      setField(loop, "condition", substituteShallow(fieldOf(loop, "condition") as SemanticValue, scope));
+  const target = (name: string): string => (fieldOf(scope, "targets") as Map<string, string>).get(name) ?? name;
+  switch (statement.k) {
+    case "let":
+      setField(statement, "value", substituteValue(statement.value, scope));
+      return;
+    case "set":
+      setField(statement, "name", target(String(fieldOf(statement, "name"))));
+      setField(statement, "value", substituteValue(statement.value, scope));
+      return;
+    case "setElement":
+      setField(statement, "buffer", target(String(fieldOf(statement, "buffer"))));
+      setField(statement, "index", substituteValue(statement.index, scope));
+      setField(statement, "value", substituteValue(statement.value, scope));
+      return;
+    case "step":
+      setField(statement, "name", target(String(fieldOf(statement, "name"))));
+      return;
+    case "if":
+      setField(statement, "condition", substituteValue(statement.condition, scope));
+      return;
+    case "loop": {
+      const loop = statement.loop;
+      const kind = String(fieldOf(loop, "kind"));
+      if (kind === "counted") {
+        setField(loop, "from", substituteValue(fieldOf(loop, "from") as SemanticValue, scope));
+        setField(loop, "to", substituteValue(fieldOf(loop, "to") as SemanticValue, scope));
+        const step = fieldOf(loop, "step") as SemanticValue | null;
+        if (step !== null) setField(loop, "step", substituteValue(step, scope));
+      } else if (kind === "each") {
+        setField(loop, "length", substituteValue(fieldOf(loop, "length") as SemanticValue, scope));
+      } else {
+        setField(loop, "condition", substituteValue(fieldOf(loop, "condition") as SemanticValue, scope));
+      }
+      return;
     }
-    return;
+    case "printText":
+    case "printNumber":
+    case "retain":
+      setField(statement, "value", substituteValue(statement.value, scope));
+      return;
+    case "call":
+      setField(statement, "call", substituteCall(statement.call, scope));
+      return;
+    case "raise":
+      setField(statement, "message", substituteValue(statement.message, scope));
+      return;
+    case "storeField":
+      setField(statement, "object", substituteValue(statement.object, scope));
+      setField(statement, "value", substituteValue(statement.value, scope));
+      return;
+    case "fill":
+      setField(statement, "buffer", target(String(fieldOf(statement, "buffer"))));
+      setField(statement, "index", target(String(fieldOf(statement, "index"))));
+      setField(statement, "value", substituteValue(statement.value, scope));
+      return;
+    default:
+      return;
   }
-  blockStatement(statement, scope);
-}
-
-/** Every statement kind that neither declares nor carries a body of its own. */
-function blockStatement(statement: SemanticStatement, scope: Scope): void {
-  const rewritten = substituteShallow(statement, scope);
-  if (rewritten === statement) return;
-  const source = rewritten as unknown as Record<string, unknown>;
-  for (const [name, value] of Object.entries(source)) setField(statement, name, value);
 }
 
 /**
@@ -1550,9 +1604,7 @@ export function renameBindings(block: SemanticBlock, scope: Scope, taken: Set<st
   const terminator = fieldOf(block, "terminator") as SemanticTerminator;
   const returned = fieldOf(terminator, "value") as SemanticValue | null;
   if (String(fieldOf(terminator, "k")) === "return" && returned !== null) {
-    setField(terminator, "value", substituteShallow(returned, scope));
-  } else {
-    setField(block, "terminator", substituteShallow(terminator, scope));
+    setField(terminator, "value", substituteValue(returned, scope));
   }
   const releases = fieldOf(block, "releases") as readonly string[];
   setField(block, "releases", releases.map((name) => (fieldOf(scope, "targets") as Map<string, string>).get(name) ?? name));

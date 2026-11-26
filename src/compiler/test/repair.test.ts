@@ -726,6 +726,28 @@ test("a callee that calls nothing is put where its call was", () => {
   assert.deepEqual(result.fn.calls, [], "and the edge the body no longer makes is gone with it");
 });
 
+test("inlining a written parameter does not rename type text", () => {
+  // A written parameter named `text` is copied to a fresh local. The rename
+  // belongs to binding names only: the builtin text.slice's parameter and return
+  // types are the word `text`, not a read of that local.
+  const result = inlined(
+    [
+      "export function cut(text: string): string {",
+      "  text = text.trim();",
+      "  return text.slice(1);",
+      "}",
+      "export function work(value: string): string {",
+      "  return cut(value);",
+      "}",
+      "",
+    ].join("\n"),
+    "work",
+  );
+  assert.ok("ir" in result);
+  assert.match(result.ir, /call\[text\] text\.slice \[arg\[text\]/);
+  assert.doesNotMatch(result.ir, /inlined1"\s*\]|type: "inlined1"/);
+});
+
 test("a callee that writes its parameter does not write the caller's name", () => {
   // A parameter is a copy of the argument, so `bump(x)` leaving `x` alone is
   // what the source says: `work(5)` is 11 and a write that reached through
