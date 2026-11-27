@@ -329,8 +329,8 @@ test("a project that names a target cpu builds against it", async () => {
   );
 });
 
-test("a project can skip candidate vectors after IR validation", async () => {
-  const directory = await workspace("unverified-vectors", { ...INPUT, verifyCandidates: false });
+test("a project can skip candidate vectors and timing after IR validation", async () => {
+  const directory = await workspace("unverified-vectors", { ...INPUT, verifyCandidates: false, benchmarkCandidates: false });
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
@@ -342,6 +342,7 @@ test("a project can skip candidate vectors after IR validation", async () => {
   assert.equal(verification?.skipped, true, "the record says vectors were skipped");
   assert.equal(verification?.cases, 0, "no contract vectors were interpreted");
   assert.equal(verification?.passed, true, "the validated candidate is still selected");
+  assert.equal(outcome.benchmark.dotProduct?.[0], undefined, "the one candidate is not timed");
 });
 
 test("a build with no model configured runs the rules alone", async (t) => {

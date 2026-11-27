@@ -556,6 +556,8 @@ export interface CandidateEvaluationRequest {
   test: TestConfig;
   /** Whether to run the candidate against its contract's vectors. */
   verifyCandidates: boolean;
+  /** Whether to time the candidate; one candidate needs no comparison. */
+  benchmarkCandidates: boolean;
   benchmark: BenchmarkConfig;
   runtime: RuntimeKind;
   /**
@@ -1159,13 +1161,15 @@ async function buildCandidate(
         threads: fieldOf(built, "threads") as Threading[],
         verification,
       },
-      timing: {
-        contract,
-        runner,
-        candidate: candidateId,
-        iterations: Number(fieldOf(fieldOf(request, "benchmark"), "iterations")),
-        vector: fieldOf(vectors, "benchmark") as TestVector,
-      },
+      timing: fieldOf(request, "benchmarkCandidates") === false
+        ? null
+        : {
+            contract,
+            runner,
+            candidate: candidateId,
+            iterations: Number(fieldOf(fieldOf(request, "benchmark"), "iterations")),
+            vector: fieldOf(vectors, "benchmark") as TestVector,
+          },
     };
   } catch (cause) {
     const error = toCompilerError(cause, "AssemblyError", "assemble", "", "", String(fieldOf(fieldOf(contract, "function"), "name")), String(fieldOf(candidate, "id")), "");
@@ -1749,6 +1753,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
     output: fieldOf(request, "output") as OutputKind,
     lowering: fieldOf(request, "lowering") as BackendKind,
     verifyCandidates: true,
+    benchmarkCandidates: true,
     mode: fieldOf(request, "mode") as BuildMode,
     runtime: fieldOf(request, "runtime") as RuntimeKind,
     workspace: fieldOf(request, "workspace") as CodegenWorkspace,

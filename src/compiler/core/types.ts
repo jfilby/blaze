@@ -522,6 +522,11 @@ export interface SourceInput {
    * compiler's behaviour.
    */
   verifyCandidates?: boolean;
+  /**
+   * Whether each candidate is timed. A rules-only build has one candidate, so
+   * there is no choice for a benchmark to make; a self-build turns it off.
+   */
+  benchmarkCandidates?: boolean;
   /** What lowers the IR. Absent when the output kind implies it. */
   backend?: BackendKind;
   /**
