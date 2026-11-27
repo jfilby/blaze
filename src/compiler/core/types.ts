@@ -528,7 +528,7 @@ export interface SourceInput {
    */
   benchmarkCandidates?: boolean;
   /** Generate independent function shards in worker processes, then link in the parent. */
-  workerProcesses?: boolean;
+  workerProcesses?: boolean | number;
   /** What lowers the IR. Absent when the output kind implies it. */
   backend?: BackendKind;
   /**

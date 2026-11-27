@@ -2742,8 +2742,13 @@ export async function runBuild(
     const programModule = join(base, "program.wasm");
     const programHost = join(base, "program.host.mjs");
     const deliveredProgram = join(String(fieldOf(project, "directory")), `${id}${EXECUTABLE_SUFFIX}`);
-    const workerCount = inputFields["workerProcesses"] === true && hostSpawnSupport()
-      ? Math.max(1, Number(fieldOf(generation, "functionConcurrency")))
+    const configuredWorkers = inputFields["workerProcesses"];
+    const workerCount = hostSpawnSupport()
+      ? configuredWorkers === true
+        ? Math.max(1, Number(fieldOf(generation, "functionConcurrency")))
+        : typeof configuredWorkers === "number"
+          ? Math.max(1, Math.floor(configuredWorkers))
+          : 1
       : 1;
     const useWorkers = !generateOnly && workerCount > 1 &&
       String(mode) === "build" && body !== undefined && !modelRequested &&
@@ -2785,7 +2790,7 @@ export async function runBuild(
       const results = await Promise.all(runs);
       for (const result of results) {
         if (result.code !== 0) {
-          throw new CompilerError("AssemblyError", "build", "a function worker failed", `${result.stderr}\n${result.stdout}`, "", "", id);
+          throw new CompilerError("AssemblyError", "build", "a function worker failed", `exit ${String(result.code)}, signal ${String(result.signal)}\n${result.stderr}\n${result.stdout}`, "", "", id);
         }
       }
       // The children wrote only their own per-function directories. The parent
