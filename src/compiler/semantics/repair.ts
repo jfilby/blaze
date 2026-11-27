@@ -1837,8 +1837,14 @@ export function inlineCalls(fn: SemanticFunction, context: RepairContext): Seman
  * a tree that call has been applied to, or null when the body has none.
  */
 function inlineOnce(fn: SemanticFunction, context: RepairContext): SemanticFunction | null {
+  const functions = fieldOf(context, "functions") as ReadonlyMap<string, SemanticFunction>;
   for (const block of blocksOf(fn)) {
     for (const callee of calleesInBlock(block)) {
+      const body = functions.get(callee);
+      // Most calls of a compiler are not inlinable: they allocate, print, read
+      // argv, carry effects or call other functions. Judge the callee before
+      // cloning the whole caller for an attempt that can only be refused.
+      if (body === undefined || inlineRefusal(body) !== null) continue;
       const attempt = structuredClone(fn);
       const outcome = inlineCall(attempt, String(fieldOf(block, "id")), callee, context);
       if ("applied" in outcome) return outcome.applied;
