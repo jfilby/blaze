@@ -1428,6 +1428,13 @@ function substituteValue(value: SemanticValue, scope: Scope): SemanticValue {
     }
     case "length":
       return { ...value, of: substituteValue(value.of, scope) };
+    case "text":
+      return {
+        ...value,
+        parts: value.parts.map((part) => part.k === "value"
+          ? { ...part, value: substituteValue(part.value, scope) }
+          : part),
+      };
     case "element": {
       const length = value.length;
       return {

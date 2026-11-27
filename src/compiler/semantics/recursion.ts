@@ -694,10 +694,12 @@ interface Program {
  */
 export function eliminateMutualRecursion(subject: SemanticFunction, known: ReadonlyMap<string, SemanticFunction>): boolean {
   const subjectName = String(fieldOf(subject, "name"));
-  const bodies = new Map<string, SemanticFunction>(known);
-  if (!bodies.has(subjectName)) bodies.set(subjectName, subject);
-  const names = [...bodies.keys()];
-  return answerCycle(subject, { names, body: (name) => bodies.get(name) });
+  const holdsSubject = known.has(subjectName);
+  const program: Program = {
+    names: holdsSubject ? [...known.keys()] : [...known.keys(), subjectName],
+    body: (name) => name === subjectName ? subject : known.get(name),
+  };
+  return answerCycle(subject, program);
 }
 
 /**
@@ -727,10 +729,11 @@ export function eliminateMutualRecursionInProgram(bodies: Iterable<SemanticFunct
  */
 export function mutualRecursionRefusal(subject: SemanticFunction, known: ReadonlyMap<string, SemanticFunction>): Refusal | null {
   const subjectName = String(fieldOf(subject, "name"));
-  const bodies = new Map<string, SemanticFunction>(known);
-  if (!bodies.has(subjectName)) bodies.set(subjectName, subject);
-  const names = [...bodies.keys()];
-  const program: Program = { names, body: (name) => bodies.get(name) };
+  const holdsSubject = known.has(subjectName);
+  const program: Program = {
+    names: holdsSubject ? [...known.keys()] : [...known.keys(), subjectName],
+    body: (name) => name === subjectName ? subject : known.get(name),
+  };
   const cycle = cycleThrough(subject, program);
   if (cycle === null) return "the body hands back to no body that hands back to it";
   const merged = mergeCycle(subject, cycle, program);
@@ -763,20 +766,28 @@ function answerCycle(subject: SemanticFunction, program: Program): boolean {
  * that keeps its frames.
  */
 function cycleThrough(subject: SemanticFunction, program: Program): string[] | null {
+  // Build edges only for bodies the search reaches. The whole-program table has
+  // thousands of functions; scanning every body for every candidate made a
+  // self-build quadratic before it generated any code.
   const edges = new Map<string, string[]>();
-  for (const name of fieldOf(program, "names")) {
+  const names = new Set(fieldOf(program, "names") as readonly string[]);
+  const targetsOf = (name: string): string[] => {
+    const held = edges.get(name);
+    if (held !== undefined) return held;
     const body = program.body(name);
-    if (body === undefined) continue;
     const targets: string[] = [];
-    for (const call of turnCallsOf(body.entry, new Set(fieldOf(program, "names")))) {
-      if (!targets.includes(call.callee)) targets.push(call.callee);
+    if (body !== undefined) {
+      for (const call of turnCallsOf(body.entry, names)) {
+        if (!targets.includes(call.callee)) targets.push(call.callee);
+      }
     }
     edges.set(name, targets);
-  }
+    return targets;
+  };
   let searched = SEARCH_LIMIT;
   const walk = (path: string[]): string[] | null => {
     const at = path[path.length - 1] as string;
-    for (const next of edges.get(at) ?? []) {
+    for (const next of targetsOf(at)) {
       if (searched-- <= 0) return null;
       // A name the path already holds closes a cycle. One that came back to the
       // body the walk started from is this body's cycle, as long as it has more
