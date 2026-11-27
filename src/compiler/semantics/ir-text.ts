@@ -909,10 +909,30 @@ class ContractBinder {
     this.declared.set(signature.symbol, { signature, effects: [...effects], builtin: false });
   }
 
+  /** A new parse has its own program-function declarations; the program index is shared. */
+  reset(): void {
+    this.declared.clear();
+  }
+
   /** The declaration of a function the program declares, for a body that names it. */
   declarationOf(name: string): FunctionSignature | null {
     return (fieldOf(this.declared.get(name), "signature") as FunctionSignature | undefined) ?? null;
   }
+}
+
+/**
+ * The program index is immutable and every candidate is parsed against the same
+ * contract. Rebuilding it scanned every function and every shared layout for
+ * each of thousands of candidates; hold it weakly by the contract instead.
+ */
+const contractBinders = new WeakMap<object, ContractBinder>();
+
+function binderFor(contract: ProgramContract): ContractBinder {
+  const held = contractBinders.get(contract);
+  const binder = held === undefined ? new ContractBinder(contract) : held;
+  binder.reset();
+  if (held === undefined) contractBinders.set(contract, binder);
+  return binder;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2112,7 +2132,7 @@ class BlockReader {
  * silently dropped instruction.
  */
 export function parseSemanticProgram(text: string, contract: ProgramContract): SemanticProgram {
-  return new ProgramReader(readLines(text), new ContractBinder(contract)).program();
+  return new ProgramReader(readLines(text), binderFor(contract)).program();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2713,11 +2733,11 @@ class FunctionReader extends BlockReader {
  * error naming its line, never a wider function read back.
  */
 export function parseSemanticFunction(text: string, contract: ProgramContract): SemanticFunction {
-  return new FunctionReader(readLines(text), new ContractBinder(contract)).function();
+  return new FunctionReader(readLines(text), binderFor(contract)).function();
 }
 
 /** Reads a file's functions back, in the order the text lists them. */
 export function parseSemanticModule(text: string, contract: ProgramContract): SemanticModule {
-  return new FunctionReader(readLines(text), new ContractBinder(contract)).module();
+  return new FunctionReader(readLines(text), binderFor(contract)).module();
 }
 
