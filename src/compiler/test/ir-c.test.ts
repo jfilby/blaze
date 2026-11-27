@@ -1035,6 +1035,18 @@ test("a power is a floating value, whatever the operands are", async () => {
   assert.deepEqual(semanticFunctionProblems(subject(F64, handsBack(power(F64)))), []);
 });
 
+test("layout name checks are stable when a shared table is validated again", () => {
+  const objects: Record<string, ObjectLayout> = {
+    Bad: { name: "not-valid", fields: [], size: 1, align: 1 },
+  };
+  const entry: SemanticBlock = { id: "entry", releases: [], statements: [], terminator: { k: "return", value: null } };
+  const fn = subject(VOID, entry, [], objects);
+  const first = semanticFunctionProblems(fn);
+  const second = semanticFunctionProblems(fn);
+  assert.deepEqual(second, first, "the cached table answers the same problems");
+  assert.equal(first.filter((problem) => problem.includes('"not-valid" is not a plain identifier')).length, 1);
+});
+
 
 /* -------------------------------------------------------------------------- */
 /* A wide number a function computes and the text it is written as             */

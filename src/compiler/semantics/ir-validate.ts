@@ -2159,6 +2159,26 @@ function checkName(problems: string[], prefix: string, name: string): void {
  */
 const programNames = new WeakMap<object, string[]>();
 
+/**
+ * Layout names and field members do not depend on the body being checked. Every
+ * function of a program carries the same layout table, so checking all of it for
+ * each of thousands of functions is quadratic. Hold the answer weakly by the
+ * table, the way program signature names are held above.
+ */
+const layoutNames = new WeakMap<object, string[]>();
+
+function layoutNameProblems(objects: Record<string, ObjectLayout>): string[] {
+  const held = layoutNames.get(objects);
+  if (held !== undefined) return held;
+  const problems: string[] = [];
+  for (const layout of Object.values(objects)) {
+    checkName(problems, "", String(fieldOf(layout, "name")));
+    for (const field of fieldOf(layout, "fields") as readonly { name: string }[]) checkName(problems, "", cMemberName(String(fieldOf(field, "name"))));
+  }
+  layoutNames.set(objects, problems);
+  return problems;
+}
+
 function programNameProblems(context: Context): string[] {
   const functions = fieldOf(context, "functions") as readonly FunctionSignature[];
   const held = programNames.get(functions);
@@ -2227,10 +2247,7 @@ function nameProblems(context: Context, tree: Tree): string[] {
   if (fieldOf(context, "functions") !== null) {
     for (const problem of programNameProblems(context)) problems.push(problem);
   }
-  for (const layout of Object.values(fieldOf(context, "objects") as Record<string, ObjectLayout>)) {
-    checkName(problems, "", String(fieldOf(layout, "name")));
-    for (const field of fieldOf(layout, "fields") as readonly { name: string }[]) checkName(problems, "", cMemberName(String(fieldOf(field, "name"))));
-  }
+  for (const problem of layoutNameProblems(fieldOf(context, "objects") as Record<string, ObjectLayout>)) problems.push(problem);
   for (const name of fieldOf(context, "declared") as readonly string[]) checkName(problems, "", name);
 
   return problems;
