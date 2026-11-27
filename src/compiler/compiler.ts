@@ -1876,11 +1876,11 @@ function runWorker(command: string, args: readonly string[], cwd: string): Promi
     const err = child.stderr;
     if (out !== null && out !== undefined) {
       out.setEncoding("utf8");
-      out.on("data", (chunk) => { stdout += chunk; });
+      out.on("data", (chunk: string) => { stdout += chunk; });
     }
     if (err !== null && err !== undefined) {
       err.setEncoding("utf8");
-      err.on("data", (chunk) => { stderr += chunk; });
+      err.on("data", (chunk: string) => { stderr += chunk; });
     }
     child.on("error", (error) => reject(`${command} failed to start: ${String(fieldOf(error, "message") ?? error)}`));
     child.on("close", (code, signal) => resolve({ stdout, stderr, code, signal }));
