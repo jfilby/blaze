@@ -8,6 +8,7 @@ mode = "debug"
 # fixed point's oracle. The delivered compiler is still checked by stage 2.
 verifyCandidates = false
 benchmarkCandidates = false
+workerProcesses = true
 
 # The build has four cores; code generation is independent per function.
 [generation]

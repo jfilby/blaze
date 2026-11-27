@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild, runSemanticIr, runStored, inspectProject, type Reporter } from "../compiler.ts";
 import { storeDirectory } from "./scratch.ts";
@@ -343,6 +343,40 @@ test("a project can skip candidate vectors and timing after IR validation", asyn
   assert.equal(verification?.cases, 0, "no contract vectors were interpreted");
   assert.equal(verification?.passed, true, "the validated candidate is still selected");
   assert.equal(outcome.benchmark.dotProduct?.[0], undefined, "the one candidate is not timed");
+});
+
+test("worker processes generate disjoint function shards", async () => {
+  const directory = await scratch("blaze-workers-");
+  await symlink(join(import.meta.dirname ?? ".", "..", "cli.ts"), join(directory, "cli.ts"));
+  const source: string[] = [];
+  for (let at = 0; at < 12; at += 1) source.push(`function f${at}(x: number): number { return x + ${at}; }`);
+  source.push("console.log(f0(1), f1(1), f2(1), f3(1));");
+  source.push("console.log(f4(1), f5(1), f6(1), f7(1));");
+  source.push("console.log(f8(1), f9(1), f10(1), f11(1));");
+  await writeFile(join(directory, "main.ts"), source.join("\n"), "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    output: "machine",
+    backend: "machine",
+    verifyProgram: false,
+    verifyCandidates: false,
+    benchmarkCandidates: false,
+    workerProcesses: true,
+    generation: { functionConcurrency: 4 },
+  });
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, recompile: true, verify: "none", backend: "machine" },
+    quiet,
+    "build",
+  );
+  assert.equal(outcome.build.status, "success");
+  assert.equal(Object.keys(outcome.build.selectedCandidates ?? {}).length, 12);
+  assert.ok(outcome.outputPath !== null);
+  const delivered = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, "1 2 3 4\n5 6 7 8\n9 10 11 12\n");
 });
 
 test("a build with no model configured runs the rules alone", async (t) => {

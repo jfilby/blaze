@@ -347,6 +347,11 @@ export function hostRaiseSignal(signal: HostSignal): void {
   process.kill(process.pid, signal);
 }
 
+/** The executable the operating system started, or an empty text where the host cannot name it. */
+export function hostExecPath(): string {
+  return process.execPath;
+}
+
 /** Whether the host can start a child without blocking the process. */
 export function hostSpawnSupport(): boolean {
   return true;

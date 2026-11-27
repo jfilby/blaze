@@ -134,6 +134,7 @@ export {
   hostBoundHeap,
   hostCwd,
   hostEnvironment,
+  hostExecPath,
   hostOnExit,
   hostOnSignal,
   hostPlatform,

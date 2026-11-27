@@ -606,6 +606,11 @@ export function hostRaiseSignal(_signal: HostSignal): void {
   return;
 }
 
+/** The native host has no asynchronous worker processes. */
+export function hostExecPath(): string {
+  return "";
+}
+
 /** Whether the host can start a child without blocking the process. */
 export function hostSpawnSupport(): boolean {
   return false;

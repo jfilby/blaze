@@ -527,6 +527,8 @@ export interface SourceInput {
    * there is no choice for a benchmark to make; a self-build turns it off.
    */
   benchmarkCandidates?: boolean;
+  /** Generate independent function shards in worker processes, then link in the parent. */
+  workerProcesses?: boolean;
   /** What lowers the IR. Absent when the output kind implies it. */
   backend?: BackendKind;
   /**

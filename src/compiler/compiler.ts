@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, writeFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
+import { existsSync, readFileSync, writeFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostExecPath, hostSpawn, hostSpawnSupport, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -300,6 +300,12 @@ export interface BuildOptions {
   candidateConcurrency?: number;
   /** Functions reviewed at the same time; 1 reviews them one at a time. */
   functionConcurrency?: number;
+  /** Generate only these unit symbols, for a worker-process shard. */
+  workerUnits?: readonly string[];
+  /** Write artifacts but leave state records and program linking to the parent. */
+  generateOnly?: boolean;
+  /** Suppress progress output for a worker process. */
+  quiet?: boolean;
   randomCases?: number;
   maxLength?: number;
   /** What the build delivers; overrides the input file. */
@@ -1853,6 +1859,34 @@ function contractPhaseFor(
   });
 }
 
+/** A worker process's output and exit, collected without blocking the parent. */
+interface WorkerRun {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+  signal: string | null;
+}
+
+function runWorker(command: string, args: readonly string[], cwd: string): Promise<WorkerRun> {
+  return new Promise((resolve, reject) => {
+    const child = hostSpawn(command, args, { cwd });
+    let stdout = "";
+    let stderr = "";
+    const out = child.stdout;
+    const err = child.stderr;
+    if (out !== null && out !== undefined) {
+      out.setEncoding("utf8");
+      out.on("data", (chunk) => { stdout += chunk; });
+    }
+    if (err !== null && err !== undefined) {
+      err.setEncoding("utf8");
+      err.on("data", (chunk) => { stderr += chunk; });
+    }
+    child.on("error", (error) => reject(`${command} failed to start: ${String(fieldOf(error, "message") ?? error)}`));
+    child.on("close", (code, signal) => resolve({ stdout, stderr, code, signal }));
+  });
+}
+
 export async function runBuild(
   inputPath: string,
   options: BuildOptions,
@@ -1861,6 +1895,8 @@ export async function runBuild(
 ): Promise<BuildOutcome> {
   const fields = options as unknown as Record<string, unknown>;
   const retainRecords = fields["retainRecords"] !== false;
+  const generateOnly = fields["generateOnly"] === true;
+  const workerUnits = fields["workerUnits"] as readonly string[] | undefined;
   const store = createJsonStore(join(String(fields["cwd"]), STATE_DIRECTORY));
   const absoluteInput = resolveFrom(String(fields["cwd"]), inputPath);
   const id = projectIdFor(absoluteInput);
@@ -2010,14 +2046,14 @@ export async function runBuild(
 
   await storeMkdirp(store, String(fieldOf(paths, "root")));
   await storeMkdirp(store, workPath);
-  if (String(fieldOf(fields, "recompile")) === "true") {
+  if (!generateOnly && String(fieldOf(fields, "recompile")) === "true") {
     try { await storeRemove(store, join(workPath, "program.c")); } catch {}
   }
   await storeMkdirp(store, String(fieldOf(paths, "output")));
   // The project is stored as the record the rest of the compiler reads, which
   // is JSON whatever the project file is, so `blaze test` and `blaze benchmark`
   // re-run a build against the project it was given.
-  await storeWrite(store, inputStorePath, input);
+  if (!generateOnly) await storeWrite(store, inputStorePath, input);
 
   const createdAt = new Date().toISOString();
   const build: BuildStatus = {
@@ -2043,7 +2079,7 @@ export async function runBuild(
     // change that forced one is already visible as the stamp, which moved.
     recompiled: String(fieldOf(fields, "recompile")) === "true",
   };
-  await writeBuildRecord(store, buildPathOf(paths), build);
+  if (!generateOnly) await writeBuildRecord(store, buildPathOf(paths), build);
 
   /**
    * The model is resolved on first use rather than up front: a build that
@@ -2083,7 +2119,9 @@ export async function runBuild(
     const programFields = program as unknown as Record<string, unknown>;
     const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
     const entry = programFields["entry"] as Record<string, unknown>;
-    const units = compilationUnits(program, body !== undefined);
+    const allUnits = compilationUnits(program, body !== undefined);
+    const workerSet = workerUnits === undefined ? undefined : new Set(workerUnits);
+    const units = workerSet === undefined ? allUnits : allUnits.filter((unit) => workerSet.has(unitKey(unit)));
     const { functions: semantics, driver: resolved } = semanticFunctions(program, objectNames, body, objectLayouts, objectKeys);
     // The IR of every function is resolved and checked here, before a model is
     // asked for anything: a function no backend may lower never reaches one.
@@ -2106,7 +2144,7 @@ export async function runBuild(
   // Keep it once on disk and write it back into each definition on read, so a
   // build of the compiler does not serialize thousands of copies of its module
   // graph.
-  await storeWrite(store, String(fieldOf(paths, "contract")), compactContract(program));
+  if (!generateOnly) await storeWrite(store, String(fieldOf(paths, "contract")), compactContract(program));
     reporter(
       "contract",
       "ok",
@@ -2145,7 +2183,7 @@ export async function runBuild(
     // ones the project asked for.
     let bodyLowering: ProgramLowering | undefined;
     if (backendKind === "machine") {
-      const refusal = machineRefusalOf(units, semantics, contractsByName(files), target);
+      const refusal = machineRefusalOf(allUnits, semantics, contractsByName(files), target);
       if (refusal !== null) {
         const refusalFields = refusal as unknown as Record<string, unknown>;
         const reason = String(refusalFields["reason"]);
@@ -2167,12 +2205,12 @@ export async function runBuild(
         // driver links beside itself. What the backend refused stays in the
         // driver, and so does everything whose call to it would hand over
         // what only one convention carries.
-        bodyLowering = programLoweringOf(driver, new Set(units.map(unitKey)), target);
+        bodyLowering = programLoweringOf(driver, new Set(allUnits.map(unitKey)), target);
         const notes: string[] = fieldOf(bodyLowering, "notes") as unknown as string[];
         for (const note of notes) reporter("assemble", "info", String(note));
       }
     }
-    await writeBuildRecord(store, buildPathOf(paths), build);
+    if (!generateOnly) await writeBuildRecord(store, buildPathOf(paths), build);
 
     assertAssemblerSupportsArch(target);
     if (body !== undefined) assertProgramOutput(outputKind, String((projectFields["entry"] as Record<string, unknown>)["source"]));
@@ -2289,7 +2327,7 @@ export async function runBuild(
       if (discardStored) {
         const entries: [string, () => Promise<unknown>][] = [];
         for (const unit of units) {
-          const key = unitNameKey(unit, units);
+          const key = unitNameKey(unit, allUnits);
           const file = spooledIncremental.get(key);
           if (file !== undefined) entries.push([key, async () => JSON.parse(await readFile(file, "utf8")) as unknown]);
         }
@@ -2302,7 +2340,7 @@ export async function runBuild(
       // this writes out is missing every entry it was going to keep.
       const proved = Object.create(null) as IncrementalRecord;
       for (const unit of units) {
-        const key = unitNameKey(unit, units);
+        const key = unitNameKey(unit, allUnits);
         const entry = awaitingProgram.get(key) ?? incremental[key];
         if (entry !== undefined) proved[key] = entry;
       }
@@ -2352,7 +2390,7 @@ export async function runBuild(
      * for again.
      */
     const generateUnit = async (unit: CompilationUnit, mismatch: ProgramMismatch | undefined): Promise<void> => {
-      const key = unitNameKey(unit, units);
+      const key = unitNameKey(unit, allUnits);
       const artifactKey = unitKey(unit);
       const functionName = String(contractFunction(unitContract(unit))["name"]);
       const unitContractValue = unitContract(unit) as unknown as FunctionContract;
@@ -2579,7 +2617,9 @@ export async function runBuild(
           await generateUnit(units[index], mismatch);
         }
       };
-      const workers = Math.max(1, Math.min((generation as unknown as Record<string, unknown>)["functionConcurrency"] as number, units.length));
+      const workers = workerUnits === undefined
+        ? Math.max(1, Math.min((generation as unknown as Record<string, unknown>)["functionConcurrency"] as number, units.length))
+        : 1;
       // A function that fails outright fails the build, so every worker is
       // allowed to settle before the first failure is reported: a function
       // still being generated must not go on writing work files after the
@@ -2603,7 +2643,7 @@ export async function runBuild(
         const unit = entry.unit;
         const result = readUnitGeneration(entry);
         const functionName = String(contractFunction(unitContract(unit))["name"]);
-        const key = unitNameKey(unit, units);
+        const key = unitNameKey(unit, allUnits);
         const outcomes = result.outcomes;
         const valid = outcomes.filter((outcome) => outcome["valid"] as boolean).length;
         reporter(
@@ -2634,7 +2674,7 @@ export async function runBuild(
       const benchmarkEntries: [string, () => Promise<unknown>][] = [];
       const generationEntries: [string, () => Promise<unknown>][] = [];
       for (const entry of generated) {
-        const key = unitNameKey(entry.unit, units);
+        const key = unitNameKey(entry.unit, allUnits);
         candidateEntries.push([key, async () => (readUnitGeneration(entry)).candidates]);
         verificationEntries.push([key, async () => {
           const outcomes = (readUnitGeneration(entry)).outcomes;
@@ -2702,8 +2742,79 @@ export async function runBuild(
     const programModule = join(base, "program.wasm");
     const programHost = join(base, "program.host.mjs");
     const deliveredProgram = join(String(fieldOf(project, "directory")), `${id}${EXECUTABLE_SUFFIX}`);
+    const workerCount = inputFields["workerProcesses"] === true && hostSpawnSupport()
+      ? Math.max(1, Number(fieldOf(generation, "functionConcurrency")))
+      : 1;
+    const useWorkers = !generateOnly && workerCount > 1 &&
+      String(mode) === "build" && body !== undefined && !modelRequested &&
+      inputFields["verifyCandidates"] === false && inputFields["benchmarkCandidates"] === false &&
+      programVerification === "none" && discardStored && fields["reuse"] !== true &&
+      hostExecPath() !== "";
+    if (useWorkers) {
+      // Build the shared runtime before any child starts, so the workers all
+      // reuse its cache instead of racing to write the same object.
+      await (prepareRuntime as unknown as (capture: undefined) => Promise<PreparedRuntime | undefined>)(undefined);
+      const shards: string[][] = [];
+      for (let at = 0; at < workerCount; at += 1) shards[at] = [];
+      for (let at = 0; at < allUnits.length; at += 1) {
+        const shard = shards[at % workerCount];
+        if (shard !== undefined) shard.push(unitKey(allUnits[at] as CompilationUnit));
+      }
+      const workerDirectory = join(base, "workers");
+      await mkdir(workerDirectory, { recursive: true });
+      const executable = hostExecPath();
+      const script = resolveFrom(String(fields["cwd"]), "cli.ts");
+      const runs = shards.map(async (shard, at): Promise<WorkerRun> => {
+        const manifest = join(workerDirectory, `shard${at}.json`);
+        await writeFile(manifest, JSON.stringify(shard), "utf8");
+        return runWorker(executable, [
+          script,
+          "build",
+          inputPath,
+          "--recompile",
+          "--verify",
+          "none",
+          "--backend",
+          backendKind,
+          "--generate-only",
+          "--worker-units",
+          manifest,
+          "--quiet",
+        ], String(fields["cwd"]));
+      });
+      const results = await Promise.all(runs);
+      for (const result of results) {
+        if (result.code !== 0) {
+          throw new CompilerError("AssemblyError", "build", "a function worker failed", `${result.stderr}\n${result.stdout}`, "", "", id);
+        }
+      }
+      // The children wrote only their own per-function directories. The parent
+      // owns the shared records and the final link, and reads each spooled result
+      // once as it builds those records.
+      for (const unit of allUnits) {
+        const artifactKey = unitKey(unit);
+        const file = join(join(base, artifactKey), "generation.json");
+        if (!existsSync(file)) throw new CompilerError("AssemblyError", "build", `worker produced no result for ${artifactKey}`, file, artifactKey, "", id);
+        const stored = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+        const selected = stored["selected"] as string | null;
+        if (selected === null) throw new CompilerError("AssemblyError", "build", `worker selected no candidate for ${artifactKey}`, file, artifactKey, "", id);
+        const object = join(join(base, artifactKey), `${selected}.o`);
+        if (!existsSync(object)) throw new CompilerError("AssemblyError", "build", `worker produced no object for ${artifactKey}`, object, artifactKey, selected, id);
+        generatedByFunction.set(artifactKey, {
+          unit,
+          file,
+          selected,
+          modelDurationNs: BigInt(String(stored["modelDurationNs"])),
+        });
+        const incrementalFile = join(join(base, artifactKey), "incremental.json");
+        if (!existsSync(incrementalFile)) throw new CompilerError("AssemblyError", "build", `worker produced no incremental entry for ${artifactKey}`, incrementalFile, artifactKey, selected, id);
+        spooledIncremental.set(unitNameKey(unit, allUnits), incrementalFile);
+      }
+    }
+
     for (let round = 1; ; round += 1) {
-      await generateUnits(mismatch);
+      if (!useWorkers) await generateUnits(mismatch);
+      if (generateOnly) break;
       selected = await record();
       if (driver === undefined || programFile === undefined || String(mode) !== "build") break;
       const runtime = await (prepareRuntime as unknown as (capture: undefined) => Promise<PreparedRuntime | undefined>)(undefined);
@@ -2839,7 +2950,7 @@ export async function runBuild(
       mismatch = checkedFields["difference"] as ProgramMismatch | undefined;
       const state: RepairState = {
         implementations: byName(units.map((unit): [string, string] => [
-          unitNameKey(unit, units),
+          unitNameKey(unit, allUnits),
           implementationOf(unitKey(unit)) ?? "",
         ])),
         mismatch: mismatch === undefined ? undefined : `${String(mismatch.line)}:${String(mismatch.expected)}:${String(mismatch.actual)}:${String(mismatch.failure ?? "")}`,
@@ -2910,7 +3021,7 @@ export async function runBuild(
       const unit = entry.unit;
       const result = readUnitGeneration(entry);
       const functionName = String(contractFunction(unitContract(unit))["name"]);
-      const key = unitNameKey(unit, units);
+      const key = unitNameKey(unit, allUnits);
       const outcomes = result.outcomes;
       const selectedCandidate = String(result.selected);
       if (retainRecords) {
@@ -2961,6 +3072,24 @@ export async function runBuild(
     const benchmark = byName(benchmarkEntries);
     const outcomes = byName(outcomeEntries);
 
+    if (generateOnly) {
+      setFieldOn(build, "status", "success");
+      return buildOutcomeOf(
+        id,
+        build,
+        Object.fromEntries(units.map((unit) => [unitNameKey(unit, allUnits), unitContract(unit) as unknown as FunctionContract])),
+        program,
+        body,
+        {},
+        {},
+        {},
+        {},
+        outputKind,
+        null,
+        null,
+      );
+    }
+
     let outputPath: string | null = null;
     let outputAssemblyPath: string | null = null;
     if (String(mode) === "build") {
@@ -2998,7 +3127,7 @@ export async function runBuild(
       } else {
         const firstUnit = units[0] as CompilationUnit;
         const firstContract = unitContract(firstUnit) as unknown as FunctionContract;
-        const key = unitNameKey(firstUnit, units);
+        const key = unitNameKey(firstUnit, allUnits);
         const artifactKey = unitKey(firstUnit);
         const functionName = String(contractFunction(unitContract(firstUnit))["name"]);
         const winner = selected[key];
@@ -3069,7 +3198,7 @@ export async function runBuild(
     // assembly pointed automation at a file that was never written.
     if (outputPath !== null) setFieldOn(build, "output", relative(String(fieldOf(store, "root")), outputPath));
     setFieldOn(build, "updatedAt", new Date().toISOString());
-    await writeBuildRecord(store, buildPathOf(paths), build);
+    if (!generateOnly) await writeBuildRecord(store, buildPathOf(paths), build);
 
     const generationRecord = generationRecordOf(
       selected,
@@ -3081,7 +3210,7 @@ export async function runBuild(
     return buildOutcomeOf(
       id,
       build,
-      Object.fromEntries(units.map((unit) => [unitNameKey(unit, units), unitContract(unit) as unknown as FunctionContract])),
+      Object.fromEntries(units.map((unit) => [unitNameKey(unit, allUnits), unitContract(unit) as unknown as FunctionContract])),
       program,
       body,
       candidates,
@@ -3099,7 +3228,7 @@ export async function runBuild(
     setFieldOn(build, "status", "failed");
     setFieldOn(build, "error", error.toJSON());
     setFieldOn(build, "updatedAt", new Date().toISOString());
-    await writeBuildRecord(store, buildPathOf(paths), build);
+    if (!generateOnly) await writeBuildRecord(store, buildPathOf(paths), build);
     throw error;
   }
 }

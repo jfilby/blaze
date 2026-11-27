@@ -14,7 +14,7 @@
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
-import { existsSync, writeFileSync, readFile, resolveFrom, parseArgs, isDirectoryPath, hostArguments, hostAsk, hostCwd, hostSetExitCode, hostStdoutIsTTY, hostWriteError, hostWriteOut } from "./core/platform.ts";
+import { existsSync, writeFileSync, readFileSync, readFile, resolveFrom, parseArgs, isDirectoryPath, hostArguments, hostAsk, hostCwd, hostSetExitCode, hostStdoutIsTTY, hostWriteError, hostWriteOut } from "./core/platform.ts";
 import { CompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
@@ -272,10 +272,16 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
   if (recompile && values.reuse) {
     throw new Error("--recompile and --reuse ask for opposite builds: one rebuilds everything, the other rebuilds nothing");
   }
+  const workerUnits = typeof values["worker-units"] === "string"
+    ? JSON.parse(readFileSync(String(values["worker-units"]), "utf8")) as readonly string[]
+    : undefined;
   return {
     cwd: hostCwd(),
     reuse: values.reuse ? true : false,
     retainRecords: false,
+    ...(workerUnits === undefined ? {} : { workerUnits }),
+    ...(values["generate-only"] ? { generateOnly: true } : {}),
+    ...(values.quiet ? { quiet: true } : {}),
     ...(recompile ? { recompile: true } : {}),
     confirm: terminalConfirm,
     // What is left on the command line after the command and the project is
@@ -335,6 +341,9 @@ async function main(argv: readonly string[]): Promise<number> {
       "max-retries": { type: "string" },
       "candidate-concurrency": { type: "string" },
       "function-concurrency": { type: "string" },
+      "worker-units": { type: "string" },
+      "generate-only": { type: "boolean" },
+      quiet: { type: "boolean" },
       "random-cases": { type: "string" },
       "max-length": { type: "string" },
       help: { type: "boolean", short: "h" },
@@ -361,7 +370,7 @@ async function main(argv: readonly string[]): Promise<number> {
       const input = argument ?? defaultProjectFile();
       const title = titleAnimation(projectIdFor(resolveFrom(input, ".")));
       try {
-        await runBuild(input, options, consoleReporter(), command);
+        await runBuild(input, options, values.quiet ? () => {} : consoleReporter(), command);
         if (command === "generate") {
           hostWriteOut(`\nProject: ${STATE_DIRECTORY}/projects/${projectIdFor(input)}\n`);
         }
