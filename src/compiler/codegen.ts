@@ -1050,6 +1050,19 @@ async function buildCandidate(
     // executed at all; the program it belongs to is what says whether the two
     // agree, and it keeps that job.
     if (vectors === null) {
+      if (fieldOf(request, "verifyCandidates") === false) {
+        return {
+          outcome: {
+            candidate: candidateId,
+            valid: true,
+            probe: { called: false, reason: null },
+            textSizeBytes: Number(fieldOf(built, "textSizeBytes")),
+            objectSizeBytes: Number(fieldOf(built, "sizeBytes")),
+            threads: fieldOf(built, "threads") as Threading[],
+          },
+          timing: null,
+        };
+      }
       const parsed = fieldOf(request, "parsed") as ParsedContract;
       const probe = await probeCandidate(request, paths, planProbe(contract, parsed), fieldOf(built, "threads") as Threading[]);
       const reason = fieldOf(probe, "reason") as string | null;
