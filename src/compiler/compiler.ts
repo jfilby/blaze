@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, writeFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostExecPath, hostSpawn, hostSpawnSupport, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
+import { existsSync, readFileSync, writeFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostExecPath, hostSpawn, hostSpawnSupport, hostPlatform, join, relative, resolveFrom, isDirectoryPath, sleep } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -2770,6 +2770,11 @@ export async function runBuild(
       const executable = hostExecPath();
       const script = resolveFrom(String(fields["cwd"]), "cli.ts");
       const runs = shards.map(async (shard, at): Promise<WorkerRun> => {
+        // Each child loads the full contract and semantic graph before it
+        // generates anything. Starting them together can exhaust the machine
+        // before the first artifact is written; stagger the full-graph loads
+        // while keeping every shard alive for the long code-generation phase.
+        if (at > 0) await sleep(at * 60_000);
         const manifest = join(workerDirectory, `shard${at}.json`);
         await writeFile(manifest, JSON.stringify(shard), "utf8");
         return runWorker(executable, [
