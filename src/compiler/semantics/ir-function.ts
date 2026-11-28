@@ -884,13 +884,25 @@ class FunctionBody {
           this.finish({ k: "return", value: null });
           return;
         }
-        let value = this.typed(fieldOfValue(statement, "value") as Expression, this.returns, Number(fieldOfValue(statement, "line"))).value;
+        const expression = fieldOfValue(statement, "value") as Expression;
+        let value = this.typed(expression, this.returns, Number(fieldOfValue(statement, "line"))).value;
         // A function declared to answer a dynamic number may return a wide
         // whole: `number | bigint` is that number at the call site, and the
         // conversion is the one `Number(whole)` makes.
         const answerType = fieldOfValue(this.returns, "type") as SemanticType;
         if (answerType.kind === "primitive" && answerType.name === "f64" && isWideType(value.type)) {
           value = fieldOfValue(this.runtimeCall("Number", [value], F64), "value") as SemanticValue;
+        }
+        // A call or name that answers a dynamic handle can be returned at a
+        // named record type. Cross through the pointer the handle names, just as
+        // a declaration read at that type does; relabeling the double alone
+        // would hand the backend a number where the return signature wants a
+        // pointer.
+        if ((expression.k === "call" || expression.k === "ident") && answerType.kind === "ref" && answerType.name !== undefined && (
+          (value.type.kind === "primitive" && value.type.name === "f64") ||
+          (value.type.kind === "ref" && value.type.name === undefined)
+        )) {
+          value = fieldOfValue(this.runtimeCall("blaze_pointer_of_handle", [value], ANY_REF), "value") as SemanticValue;
         }
         // A function declared to return nothing cannot hand back a value,
         // whatever type the value it was written with has. A concise arrow

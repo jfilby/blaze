@@ -89,6 +89,24 @@ test("a cast call ignores arguments beyond an arrow's declared arity", async () 
   }
 });
 
+test("a dynamic handle returned at a record type crosses through its pointer", async () => {
+  // `identity` answers the runtime's dynamic handle. Returning that call at a
+  // named record type must read the pointer out of the handle, not relabel the
+  // handle's double as the record pointer.
+  const source = [
+    "function identity(value: unknown): unknown { return value; }",
+    "function shape(value: unknown): { n: number } {",
+    "  return identity(value) as { n: number };",
+    "}",
+    "console.log(shape({ n: 7 }).n);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "7", `the ${backend} backend returns the record behind the handle`);
+  }
+});
+
 test("fs.existsSync answers whether a path names anything", async () => {
   // The probe is the runtime's: a file the test made is found, and the name
   // beside it is not. Both lowerings answer the same.
