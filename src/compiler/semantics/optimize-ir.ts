@@ -2720,6 +2720,13 @@ function propagateCopies(body: Body): boolean {
       if (statement.k === "let") {
         const value = fieldOf(statement, "value") as SemanticValue;
         if (value.k === "local") {
+          const copyType = slotType(fieldOf(statement, "slot") as SemanticSlot);
+          const sourceType = localTypeOf(body, String(fieldOf(value, "name")));
+          // A copy whose slot changes the value's type can carry a conversion:
+          // a shaped reference read as ref<any> becomes a runtime handle, not
+          // the source pointer under a new name. Keep that binding so the
+          // backend writes the conversion at the declaration the IR states.
+          if (!typeEquals(copyType, sourceType)) continue;
           candidates[candidates.length] = { name: String(fieldOf(fieldOf(statement, "slot"), "name")), source: String(fieldOf(value, "name")) };
         }
       }

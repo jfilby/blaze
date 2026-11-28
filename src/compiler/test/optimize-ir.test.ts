@@ -726,6 +726,28 @@ test("a copy of a name nothing writes is read as the name it copies", () => {
   assert.match(after, /set sum \+= local\[f64\] a/);
 });
 
+test("a copy that changes a reference's shape keeps its conversion", () => {
+  // `let dynamic = record` reads a shaped pointer as ref<any>, which the ABI
+  // carries as a handle. Propagating the copy would only relabel the pointer and
+  // drop the conversion the backend has to write at the binding.
+  const SHAPED: SemanticType = { kind: "ref", of: null, name: "Record" };
+  const ANY: SemanticType = { kind: "ref", of: null };
+  const record: SemanticSlot = { kind: "value", name: "record", mutable: false, type: SHAPED };
+  const fn = fnOf({
+    id: "entry", releases: [],
+    terminator: { k: "return", value: { k: "local", type: ANY, name: "dynamic" } },
+    statements: [{
+      k: "let", line: 1,
+      slot: { kind: "object", name: "dynamic", mutable: false, type: ANY },
+      value: { k: "local", type: SHAPED, name: "record" },
+    }],
+  }, ANY, [record]);
+  const after = printed(fn);
+  assert.match(after, /let object\[ref<any>\] dynamic/, "the converting binding stays");
+  assert.match(after, /local\[ref<Record>\] record/, "the source keeps its shaped type");
+  assert.deepEqual(semanticFunctionProblems(optimizeSemanticFunction(fn)), []);
+});
+
 test("a copy of a name a fill writes is left bound", () => {
   // A fill names the buffer it writes as a bare string, the same as an element
   // write, so a substitution over values cannot reach it: dropping the copy and
