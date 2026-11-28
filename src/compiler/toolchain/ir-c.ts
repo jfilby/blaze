@@ -1948,6 +1948,7 @@ class FunctionEmitter {
     // conversion there is to a wide number is the widening, and it is the
     // kernel's.
     if (isWideType(as)) return this.widen(written, value, as);
+    if (isWideType(fieldOf(value,"type")) && isNumber(as)) return this.narrowWide(written, value, as);
     if (fromDynamic && isNumber(as)) {
       return `${RUNTIME_NAME}_to_number(${written})`;
     }
@@ -1968,6 +1969,21 @@ class FunctionEmitter {
     }
     if (isReference(fieldOf(value,"type")) && isReference(as)) return `(${declaredType(as)})(uintptr_t)(${written})`;
     return written;
+  }
+
+  /**
+   * A wide whole number read at a narrow number. The value is an aggregate, so
+   * it is bound once before the runtime helper takes its address; casting the
+   * struct itself is not a C conversion.
+   */
+  private narrowWide(written: string, value: SemanticValue, as: SemanticType): string {
+    const signed = String(fieldOf(fieldOf(value,"type"),"name")) === "i256";
+    const wide = signed ? "blaze_i256" : "blaze_u256";
+    const out = this.temporary("blaze_wide_narrow");
+    const conversion = isFloat(as)
+      ? `${signed ? "i256" : "u256"}_to_double`
+      : signed ? "i256_to_i64" : "u256_to_u64";
+    return `({ ${wide} ${out} = ${written}; (${declaredType(as)})${RUNTIME_NAME}_${conversion}(&${out}); })`;
   }
 
   /**

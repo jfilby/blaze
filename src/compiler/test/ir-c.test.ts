@@ -1172,6 +1172,16 @@ test("the low limb of a wide number is the machine word a narrow use reads", asy
   assert.match(generateFunctionC(fn), /limbs\[0\]/);
 });
 
+test("a wide value narrows through the runtime at a narrow return", async () => {
+  // A field or return can read the four-limb value as one machine word. C cannot
+  // cast the aggregate itself, so the backend binds it and calls the runtime's
+  // narrowing helper before the final width conversion.
+  const wide = 0x0123456789abcdefn;
+  const fn = subject(I64C, handsBack(wideOf(wide)));
+  assert.equal(await lowered(fn, (name) => `printf("%lld", (long long)${name}());`), "81985529216486895");
+  assert.match(generateFunctionC(fn), /blaze_rt_u256_to_u64/);
+});
+
 test("a product reduced modulo a wide prime is the kernel the runtime answers", async () => {
   // C has no arithmetic over four limbs, so the modular multiply is the kernel:
   // the operands are bound to names first, because an operand may be a call and
