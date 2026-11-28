@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyProposal, describeSites, inlineCalls, REPAIR_RULES, type RepairOutcome } from "../semantics/repair.ts";
+import { applyProposal, describeSites, inlineCalls, renameBindings, REPAIR_RULES, type RepairOutcome } from "../semantics/repair.ts";
 import { printSemanticFunction, parseSemanticFunction } from "../semantics/ir-text.ts";
 import { validateSemanticFunction } from "../semantics/ir-validate.ts";
 import { foldedCandidate } from "../codegen.ts";
@@ -746,6 +746,28 @@ test("inlining a written parameter does not rename type text", () => {
   assert.ok("ir" in result);
   assert.match(result.ir, /call\[text\] text\.slice \[arg\[text\]/);
   assert.doesNotMatch(result.ir, /inlined1"\s*\]|type: "inlined1"/);
+});
+
+test("inlining a closure call substitutes the value it calls through", () => {
+  // `stop(fn, n)` calls its function parameter through a value. Renaming the
+  // body must replace that value with the argument, not leave the callee's
+  // parameter spelling in the IR.
+  const source = [
+    "function stop(fn: (n: number) => void, n: number): void { fn(n); }",
+    "export function work(n: number): void { stop(() => {}, n); }",
+    "main();",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  const fn = structuredClone(semanticsOf(phase)["stop"] as SemanticFunction);
+  const replacement = { k: "local" as const, type: { kind: "ref" as const, of: null }, name: "replacement" };
+  const refused = renameBindings(
+    fn.entry,
+    { reads: new Map([["fn", replacement]]), targets: new Map([["fn", "replacement"]]) },
+    new Set(["replacement"]),
+    "stop",
+  );
+  assert.equal(refused, null);
+  assert.match(printSemanticFunction(fn), /through local\[ref<any>\] replacement/);
 });
 
 test("a callee that writes its parameter does not write the caller's name", () => {

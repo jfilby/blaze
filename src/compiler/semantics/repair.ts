@@ -1494,7 +1494,12 @@ function substituteValue(value: SemanticValue, scope: Scope): SemanticValue {
 
 /** A call's arguments are values; its symbol, signature and types are not names of the callee's scope. */
 function substituteCall(call: SemanticCall, scope: Scope): SemanticCall {
-  return { ...call, args: call.args.map((one) => substituteValue(one, scope)) };
+  const through = fieldOf(call, "through") as SemanticValue | undefined;
+  return {
+    ...call,
+    ...(through === undefined ? {} : { through: substituteValue(through, scope) }),
+    args: call.args.map((one) => substituteValue(one, scope)),
+  };
 }
 
 /**

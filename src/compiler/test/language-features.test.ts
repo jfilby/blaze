@@ -4788,6 +4788,23 @@ test("a value whose type the source did not write is tested at run time", async 
   assert.equal(output.trim(), "1234");
 });
 
+test("a text beside a truth in a condition is tested as a truth", async () => {
+  // `text || flag` hands back one of its arms and is therefore written as a
+  // text, but a condition needs a boolean. The truth read normalizes both arms
+  // instead of asking C to choose between a `const char*` and a bool.
+  const source = [
+    "function demo(text: string, flag: boolean): string {",
+    "  return text || flag ? `yes` : `no`;",
+    "}",
+    "console.log(demo(``, true), demo(`x`, false));",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "yes yes", `the ${backend} backend tests the mixed logical`);
+  }
+});
+
 test("a test of a value settles what the branch reads it as", async () => {
   // A guard that leaves the block, an arm of a conditional, and the right side
   // of a disjunction all read the value at the type their own test asked for.

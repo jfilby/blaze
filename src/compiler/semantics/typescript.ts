@@ -16956,7 +16956,10 @@ class TypeScriptParser {
       captures: [...captures],
       captureTypes,
       params: written,
-      returns,
+      // Calling an async arrow answers the promise handle, not its payload. The
+      // lifted body carries the payload beside its contract; the closure entry
+      // and every call through the arrow must hand back the handle itself.
+      returns: isAsync ? { kind: "ref", of: null } : returns,
     };
     const restAt = params.findIndex((param) => (fieldOf(param, "rest") as boolean | undefined) === true);
     if (restAt >= 0) binding.rest = restAt;

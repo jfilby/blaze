@@ -2888,6 +2888,29 @@ class FunctionBody {
    * source wrote with `!== 0n`.
    */
   private truth(value: SemanticValue): SemanticValue {
+    if (value.k === "logical" && isText(value.type)) {
+      const left = value.left;
+      const right = value.right;
+      if (isBoolean(left.type) || isBoolean(right.type)) {
+        const asTruth = (arm: SemanticValue): SemanticValue => {
+          if (isBoolean(arm.type)) return arm;
+          if (isText(arm.type)) {
+            return {
+              k: "compare",
+              type: BOOL,
+              op: "ne",
+              operand: TEXT,
+              left: arm,
+              right: { k: "text", type: TEXT, parts: [] },
+            };
+          }
+          return arm;
+        };
+        return value.op === "or"
+          ? { k: "select", type: BOOL, condition: asTruth(left), then: { k: "bool", type: BOOL, value: true }, otherwise: asTruth(right) }
+          : { k: "select", type: BOOL, condition: asTruth(left), then: asTruth(right), otherwise: { k: "bool", type: BOOL, value: false } };
+      }
+    }
     if (!isWideType(fieldOfValue(value, "type") as SemanticType)) return value;
     return {
       k: "compare",
