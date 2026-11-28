@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, writeFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostExecPath, hostSpawn, hostSpawnSupport, hostPlatform, join, relative, resolveFrom, isDirectoryPath, sleep } from "./core/platform.ts";
+import { existsSync, readFileSync, writeFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostExecPath, hostSpawn, hostSpawnSupport, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -1860,23 +1860,62 @@ function contractPhaseFor(
 }
 
 /** A worker process's output and exit, collected without blocking the parent. */
-interface WorkerRun {
+export interface WorkerRun {
   stdout: string;
   stderr: string;
   code: number | null;
   signal: string | null;
 }
 
-function runWorker(command: string, args: readonly string[], cwd: string): Promise<WorkerRun> {
+const WORKER_READY = "__BLAZE_WORKER_READY__";
+
+/**
+ * Launch independent worker shards, optionally waiting for each one to produce
+ * its first result before loading the next full compiler graph. A worker that
+ * exits before announcing readiness releases the next shard too, so a failed
+ * startup cannot deadlock the build.
+ */
+export async function runWorkerShards(
+  count: number,
+  stagger: boolean,
+  launch: (at: number, onReady: () => void) => Promise<WorkerRun>,
+): Promise<WorkerRun[]> {
+  const runs: Promise<WorkerRun>[] = [];
+  let previous: Promise<void> = Promise.resolve();
+  for (let at = 0; at < count; at += 1) {
+    if (stagger && at > 0) await previous;
+    let release = (): void => {};
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    const run = launch(at, release);
+    runs.push(run);
+    // Readiness means either the first artifact exists or this worker has
+    // exited. Both release the same promise, so a failed startup cannot leave
+    // the next shard waiting forever.
+    run.then(release, release);
+    previous = ready;
+  }
+  return Promise.all(runs);
+}
+
+function runWorker(command: string, args: readonly string[], cwd: string, onReady?: () => void): Promise<WorkerRun> {
   return new Promise((resolve, reject) => {
     const child = hostSpawn(command, args, { cwd });
     let stdout = "";
     let stderr = "";
+    let announced = false;
+    let readyTail = "";
+    const observe = (chunk: string): void => {
+      if (announced || onReady === undefined) return;
+      readyTail = `${readyTail}${chunk}`.slice(-64);
+      if (!readyTail.includes(WORKER_READY)) return;
+      announced = true;
+      onReady();
+    };
     const out = child.stdout;
     const err = child.stderr;
     if (out !== null && out !== undefined) {
       out.setEncoding("utf8");
-      out.on("data", (chunk: string) => { stdout += chunk; });
+      out.on("data", (chunk: string) => { stdout += chunk; observe(chunk); });
     }
     if (err !== null && err !== undefined) {
       err.setEncoding("utf8");
@@ -2277,7 +2316,7 @@ export async function runBuild(
       ...modules.map((module) => String((module as unknown as Record<string, unknown>)["source"])),
       String(entry["source"]),
     ]);
-    const prepareRuntime = runtimePreparer({
+    const buildRuntime = runtimePreparer({
       lowering: backendKind,
       mode: buildMode,
       runtime: runtimeKind,
@@ -2286,6 +2325,22 @@ export async function runBuild(
       libraries,
       http,
     });
+    const runtimeRecord = join(base, "worker-runtime.json");
+    let runtimePending: Promise<PreparedRuntime | undefined> | null = null;
+    const prepareRuntime = (): Promise<PreparedRuntime | undefined> => {
+      runtimePending ??= (async (): Promise<PreparedRuntime | undefined> => {
+        // The parent owns the shared runtime. Workers read the paths it prepared
+        // instead of copying over the same object while another worker links it.
+        if (workerUnits !== undefined) {
+          const stored = JSON.parse(await readFile(runtimeRecord, "utf8")) as PreparedRuntime | null;
+          return stored === null ? undefined : stored;
+        }
+        const prepared = await buildRuntime();
+        await writeFile(runtimeRecord, prepared === undefined ? "null" : JSON.stringify(prepared), "utf8");
+        return prepared;
+      })();
+      return runtimePending;
+    };
 
     // The machine, one measurement at a time however many functions are being
     // generated.
@@ -2350,6 +2405,12 @@ export async function runBuild(
     // What a round of generation produced, by function. A repair round replaces
     // only the units it regenerates, so a program is never half rebuilt.
     const generatedByFunction = new Map<string, UnitGeneration>();
+    let workerReadyAnnounced = false;
+    const announceWorkerReady = (): void => {
+      if (workerUnits === undefined || workerReadyAnnounced) return;
+      workerReadyAnnounced = true;
+      hostWriteOut(`${WORKER_READY}\n`);
+    };
     /** Write one function's full result beside its artifacts and keep only its address. */
     const spoolResult = (workspace: CodegenWorkspace, result: CodegenResult): string => {
       const file = join(String(fieldOf(workspace, "workDirectory")), "generation.json");
@@ -2426,6 +2487,7 @@ export async function runBuild(
         reusedByFunction.set(key, String(fieldOf(reuseEntry, "selected")));
         const file = spoolResult(workspace, result as CodegenResult);
         generatedByFunction.set(artifactKey, unitGenerationOf(unit as CompilationUnit, file, result as CodegenResult));
+        announceWorkerReady();
         return;
       }
 
@@ -2537,6 +2599,7 @@ export async function runBuild(
       reusedByFunction.delete(key);
       const file = spoolResult(workspace, result);
       generatedByFunction.set(artifactKey, unitGenerationOf(unit, file, result));
+      announceWorkerReady();
 
       // A function is proved by its own vectors, or by the program it is
       // part of, so an entry is only written once something has said so.
@@ -2756,8 +2819,8 @@ export async function runBuild(
       programVerification === "none" && discardStored && fields["reuse"] !== true &&
       hostExecPath() !== "";
     if (useWorkers) {
-      // Build the shared runtime before any child starts, so the workers all
-      // reuse its cache instead of racing to write the same object.
+      // Build the shared runtime and record its paths before any child starts,
+      // so workers reuse it instead of racing to write the same object.
       await (prepareRuntime as unknown as (capture: undefined) => Promise<PreparedRuntime | undefined>)(undefined);
       const shards: string[][] = [];
       for (let at = 0; at < workerCount; at += 1) shards[at] = [];
@@ -2769,15 +2832,13 @@ export async function runBuild(
       await mkdir(workerDirectory, { recursive: true });
       const executable = hostExecPath();
       const script = resolveFrom(String(fields["cwd"]), "cli.ts");
-      const runs = shards.map(async (shard, at): Promise<WorkerRun> => {
+      const results = await runWorkerShards(workerCount, allUnits.length >= 1000, async (at, onReady) => {
         // Each child loads the full contract and semantic graph before it
-        // generates anything. Starting a large graph's workers together can
-        // exhaust the machine before the first artifact is written; stagger
-        // those loads. Small programs start together and pay no artificial wait.
-        const staggerMs = allUnits.length >= 1000 ? 60_000 : 0;
-        if (at > 0 && staggerMs > 0) await sleep(at * staggerMs);
+        // generates anything. A large graph starts the next child only after
+        // its predecessor has written one result, rather than guessing how
+        // long that load takes. Small programs still start together at once.
         const manifest = join(workerDirectory, `shard${at}.json`);
-        await writeFile(manifest, JSON.stringify(shard), "utf8");
+        await writeFile(manifest, JSON.stringify(shards[at]), "utf8");
         return runWorker(executable, [
           script,
           "build",
@@ -2791,9 +2852,8 @@ export async function runBuild(
           "--worker-units",
           manifest,
           "--quiet",
-        ], String(fields["cwd"]));
+        ], String(fields["cwd"]), onReady);
       });
-      const results = await Promise.all(runs);
       for (const result of results) {
         if (result.code !== 0) {
           throw new CompilerError("AssemblyError", "build", "a function worker failed", `exit ${String(result.code)}, signal ${String(result.signal)}\n${result.stderr}\n${result.stdout}`, "", "", id);

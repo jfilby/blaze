@@ -13341,11 +13341,16 @@ class TypeScriptParser {
         // front of the arguments.
         if (target.k === "arrow") {
           const written = this.arrowBindings.get(target.name);
-          const args = this.readCallArguments((fieldOfOptional(written, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[])?.map((param: ParameterInfo) => param.type) ?? []);
+          const params = (fieldOfOptional(written, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[])?.map((param: ParameterInfo) => param.type) ?? [];
+          const args = this.readCallArguments(params);
+          const rest = fieldOfOptional(written, "rest") as number | undefined;
           replace({
             k: "call",
             name: target.name,
-            args: [...target.captures.map((name): Expression => ({ k: "ident", name })), ...args],
+            // JavaScript ignores arguments beyond a function's declared arity.
+            // A cast may give the call a wider signature than the arrow itself,
+            // but the lifted function still takes only the parameters it declares.
+            args: [...target.captures.map((name): Expression => ({ k: "ident", name })), ...(rest === undefined ? args.slice(0, params.length) : args)],
           });
           continue;
         }
@@ -13375,7 +13380,7 @@ class TypeScriptParser {
             }
           }
           const callArgs = rest === undefined
-            ? supplied
+            ? supplied.slice(0, (fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[]).length)
             : [
                 ...args.slice(0, rest),
                 {

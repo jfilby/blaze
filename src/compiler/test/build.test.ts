@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { runBuild, runSemanticIr, runStored, inspectProject, type Reporter } from "../compiler.ts";
+import { runBuild, runSemanticIr, runStored, inspectProject, runWorkerShards, type Reporter } from "../compiler.ts";
 import { storeDirectory } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import type { Candidate, ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
@@ -343,6 +343,54 @@ test("a project can skip candidate vectors and timing after IR validation", asyn
   assert.equal(verification?.cases, 0, "no contract vectors were interpreted");
   assert.equal(verification?.passed, true, "the validated candidate is still selected");
   assert.equal(outcome.benchmark.dotProduct?.[0], undefined, "the one candidate is not timed");
+});
+
+test("large worker shards wait for a first result before starting the next", async () => {
+  const events: string[] = [];
+  const ready: (() => void)[] = [];
+  const finish: (() => void)[] = [];
+  const pending = runWorkerShards(3, true, (at, onReady) => {
+    events.push(`start ${at}`);
+    return new Promise((resolve) => {
+      ready[at] = () => { events.push(`ready ${at}`); onReady(); };
+      finish[at] = () => resolve({ stdout: "", stderr: "", code: 0, signal: null });
+    });
+  });
+  const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+  await turn();
+  assert.deepEqual(events, ["start 0"]);
+  ready[0]!();
+  await turn();
+  assert.deepEqual(events, ["start 0", "ready 0", "start 1"]);
+  ready[1]!();
+  await turn();
+  assert.deepEqual(events, ["start 0", "ready 0", "start 1", "ready 1", "start 2"]);
+  ready[2]!();
+  for (const done of finish) done();
+  assert.deepEqual((await pending).map((result) => result.code), [0, 0, 0]);
+});
+
+test("a worker that exits before readiness releases the next shard", async () => {
+  const started: number[] = [];
+  const results = await runWorkerShards(2, true, (at) => {
+    started.push(at);
+    return Promise.resolve({ stdout: "", stderr: "", code: at === 0 ? 1 : 0, signal: null });
+  });
+  assert.deepEqual(started, [0, 1]);
+  assert.deepEqual(results.map((result) => result.code), [1, 0]);
+});
+
+test("small worker shards start without waiting for readiness", async () => {
+  let started = 0;
+  const finish: (() => void)[] = [];
+  const pending = runWorkerShards(3, false, () => {
+    started += 1;
+    return new Promise((resolve) => { finish.push(() => resolve({ stdout: "", stderr: "", code: 0, signal: null })); });
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(started, 3);
+  for (const done of finish) done();
+  await pending;
 });
 
 test("worker processes generate disjoint function shards", async () => {

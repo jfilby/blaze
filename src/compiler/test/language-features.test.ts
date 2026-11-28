@@ -68,6 +68,27 @@ async function agreesWithNode(
   return delivered.stdout;
 }
 
+test("a cast call ignores arguments beyond an arrow's declared arity", async () => {
+  // JavaScript ignores extra arguments. A cast can widen the call signature
+  // without changing the arrow itself, so a lifted zero-parameter arrow must not
+  // receive the extra value as an argument its body never declared.
+  const source = [
+    "function named(): number {",
+    "  const run = (): number => 7;",
+    "  return (run as unknown as (capture: undefined) => number)(undefined);",
+    "}",
+    "function direct(): number {",
+    "  return (((): number => 7) as unknown as (capture: undefined) => number)(undefined);",
+    "}",
+    "console.log(named(), direct());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "7 7", `the ${backend} backend ignores the extra arrow argument`);
+  }
+});
+
 test("fs.existsSync answers whether a path names anything", async () => {
   // The probe is the runtime's: a file the test made is found, and the name
   // beside it is not. Both lowerings answer the same.
