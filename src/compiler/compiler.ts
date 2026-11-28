@@ -2771,10 +2771,11 @@ export async function runBuild(
       const script = resolveFrom(String(fields["cwd"]), "cli.ts");
       const runs = shards.map(async (shard, at): Promise<WorkerRun> => {
         // Each child loads the full contract and semantic graph before it
-        // generates anything. Starting them together can exhaust the machine
-        // before the first artifact is written; stagger the full-graph loads
-        // while keeping every shard alive for the long code-generation phase.
-        if (at > 0) await sleep(at * 60_000);
+        // generates anything. Starting a large graph's workers together can
+        // exhaust the machine before the first artifact is written; stagger
+        // those loads. Small programs start together and pay no artificial wait.
+        const staggerMs = allUnits.length >= 1000 ? 60_000 : 0;
+        if (at > 0 && staggerMs > 0) await sleep(at * staggerMs);
         const manifest = join(workerDirectory, `shard${at}.json`);
         await writeFile(manifest, JSON.stringify(shard), "utf8");
         return runWorker(executable, [
