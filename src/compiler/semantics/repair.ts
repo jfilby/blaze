@@ -42,6 +42,7 @@ import {
   isReference,
   isTextType,
   slotType,
+  typeEquals,
   type SemanticBlock,
   type SemanticCall,
   type SemanticFunction,
@@ -1845,6 +1846,19 @@ function inlineOnce(fn: SemanticFunction, context: RepairContext): SemanticFunct
       // argv, carry effects or call other functions. Judge the callee before
       // cloning the whole caller for an attempt that can only be refused.
       if (body === undefined || inlineRefusal(body) !== null) continue;
+      const site = callsInBlock(block, callee)[0];
+      const args = site === undefined ? [] : fieldOf(site, "call") as SemanticCall;
+      const callArgs = fieldOf(args, "args") as readonly SemanticValue[];
+      const params = fieldOf(body, "params") as readonly SemanticSlot[];
+      let sameTypes = true;
+      for (let at = 0; at < params.length; at += 1) {
+        const argument = callArgs[at];
+        if (argument === undefined || !typeEquals(slotType(params[at] as SemanticSlot), argument.type)) sameTypes = false;
+      }
+      // A real call converts a dynamic argument to the parameter's text or
+      // number. Splicing the body bypasses that conversion, so a mismatched
+      // site stays a call rather than becoming C that reads a handle as text.
+      if (!sameTypes) continue;
       const attempt = structuredClone(fn);
       const outcome = inlineCall(attempt, String(fieldOf(block, "id")), callee, context);
       if ("applied" in outcome) return outcome.applied;

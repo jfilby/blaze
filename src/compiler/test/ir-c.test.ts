@@ -833,6 +833,41 @@ test("a field whose name a C header holds is read and written as a field", async
   assert.equal(stdout, "42.000000\n");
 });
 
+test("a dynamic value written to a text field is unboxed at the write", async () => {
+  const ANY: SemanticType = { kind: "ref", of: null };
+  const objects: Record<string, ObjectLayout> = {
+    Holder: { name: "Holder", fields: [{ name: "text", type: "text", offset: 0 }], size: 8, align: 8 },
+  };
+  const dynamic: SemanticValue = {
+    k: "call",
+    type: ANY,
+    call: {
+      callee: "JSON.parse",
+      builtin: true,
+      signature: { name: "JSON.parse", symbol: "JSON.parse", params: [{ name: "text", type: "text" }], returns: "ref<any>" },
+      args: [{ k: "text", type: TEXT, parts: [{ k: "text", value: "\"hello\"" }] }],
+      argTypes: [TEXT],
+      returns: ANY,
+      effects: [],
+      ownership: "none",
+      retain: false,
+    },
+  };
+  const built: SemanticValue = {
+    k: "newObject",
+    type: { kind: "ref", of: null, name: "Holder" },
+    layout: "Holder",
+    fields: [{ name: "text", value: dynamic }],
+  };
+  const fn = subject(TEXT, {
+    id: "entry",
+    releases: [],
+    statements: [{ k: "let", slot: { kind: "object", name: "holder", mutable: true, type: { kind: "ref", of: null, name: "Holder" } }, value: built, line: 1 }],
+    terminator: { k: "return", value: { k: "loadField", type: TEXT, object: { k: "local", type: { kind: "ref", of: null, name: "Holder" }, name: "holder" }, layout: "Holder", field: "text" } },
+  }, [], objects);
+  assert.equal(await lowered(fn, (name) => `printf("%s\\n", ${name}());`), "hello\n");
+});
+
 test("a reference is written as the address a driver writes for one", async () => {
   // A reference is no number of its own, and the C used to cast it to one, which
   // is not C at all: printing an object was a source the compiler refuses. An

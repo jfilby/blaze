@@ -1803,10 +1803,14 @@ class FunctionEmitter {
   private buildObject(value: SemanticValue & { k: "newObject" }): string {
     const name = this.temporary("blaze_object");
     const written = (fieldOf(value,"fields") as { name: string; value: SemanticValue; }[]).map((field) => {
-      const expr = this.expression(fieldOf(field,"value"), null, 0);
+      // A field is read at the type its layout declares. A dynamic value stored
+      // into a text or number field must cross the same conversion a call
+      // argument crosses; lowering it with no expected type left the handle's
+      // double in a `const char*` or numeric field.
+      const declared = this.declaredField(fieldOf(value,"layout"), fieldOf(field,"name"));
+      const expr = this.expression(fieldOf(field,"value"), declared, 0);
       // A field that holds no value starts as nothing, and nothing is written
       // the way the field reads it: a number is zero and a pointer is null.
-      const declared = this.declaredField(fieldOf(value,"layout"), fieldOf(field,"name"));
       // A reference the source left unshaped is a `double` here and not a
       // pointer, so nothing is written into it as one.
       const unshaped = declared !== null && String(fieldOf(declared,"kind")) === "ref" && fieldOf(declared,"of") === null && fieldOf(declared,"name") === undefined;
