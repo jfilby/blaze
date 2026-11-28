@@ -1030,8 +1030,11 @@ class FunctionEmitter {
         // fields are read through a pointer: the cast goes through an integer
         // wide enough to hold one, as every other reference read in this
         // backend does. `self` is already a pointer and casts the same way.
+        // The value crosses the same conversion as an object literal's field:
+        // a text selected into ref<any> is boxed, not assigned as a raw pointer.
+        const declared = this.declaredField(String(fieldOf(statement,"layout")), String(fieldOf(statement,"field")));
         this.write([
-          `${pad(depth)}((struct ${fieldOf(statement,"layout")}*)(uintptr_t)(${this.objectPointer(fieldOf(statement,"object") as SemanticValue, depth)}))->${cMemberName(fieldOf(statement,"field"))} = ${this.expression(fieldOf(statement,"value"), null, depth)};`,
+          `${pad(depth)}((struct ${fieldOf(statement,"layout")}*)(uintptr_t)(${this.objectPointer(fieldOf(statement,"object") as SemanticValue, depth)}))->${cMemberName(fieldOf(statement,"field"))} = ${this.expression(fieldOf(statement,"value"), declared, depth)};`,
         ]);
         return;
       case "if":
@@ -1868,6 +1871,7 @@ class FunctionEmitter {
 
   /** A value read as the type a use fixes it at. */
   private expression(value: SemanticValue, as: SemanticType | null, depth: number): string {
+    if (String(fieldOf(value,"k")) === "select") return this.selectExpression(value as SemanticValue & { k: "select" }, as, depth);
     const written = this.raw(value, depth);
     const asAny = as !== null && String(fieldOf(as,"kind")) === "ref" && fieldOf(as,"of") === null && fieldOf(as,"name") === undefined;
     // An absence read at a type is the zero of *that* type: a field of a text
@@ -1984,6 +1988,19 @@ class FunctionEmitter {
     const out = this.temporary("blaze_wide");
     const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     return `({ ${signed ? "blaze_i256" : "blaze_u256"} ${out}; ${RUNTIME_NAME}_${signed ? "i256_from_i64" : "u256_from_u64"}(&${out}, (${signed ? "int64_t" : "uint64_t"})(${written})); ${out}; })`;
+  }
+
+  /** A choice lowered at the type its use declares, not merely the type of its arms. */
+  private selectExpression(value: SemanticValue & { k: "select" }, as: SemanticType | null, depth: number): string {
+    const wanted = as ?? value.type;
+    const arm = (one: SemanticValue): string => {
+      if (String(fieldOf(one,"k")) === "nothing") return absenceOf(wanted);
+      if (!isTextType(wanted) && (isTextType(one.type) || String(fieldOf(one,"k")) === "text")) {
+        return `${RUNTIME_NAME}_box_string(${this.raw(one, depth)})`;
+      }
+      return this.expression(one, wanted, depth);
+    };
+    return `((${this.condition(value.condition, depth)}) ? ${arm(value.then)} : ${arm(value.otherwise)})`;
   }
 
   private raw(value: SemanticValue, depth: number): string {
@@ -2237,27 +2254,8 @@ class FunctionEmitter {
           `(${arm}) == ${absenceOf(fieldOf(fieldOf(value,"left"),"type"))} ? ${this.expression(fieldOf(value,"right"), fieldOf(value,"type"), depth)} : ${arm}; })`
         );
       }
-      case "select": {
-        // A text arm of a choice is a text the runtime holds, so it is boxed
-        // where the choice is a value of its own. A choice of texts is a text
-        // itself, and a wide number is a number, so neither is boxed: a wide
-        // number boxed as a string is a pointer the compiler wrote where four
-        // limbs belong.
-        const arm = (one: SemanticValue): string => {
-          // An arm written `null` is the absence of the value the other arm
-          // wrote, so it is the zero of the type the choice is — the same zero
-          // `absenceOf` names, so that a `=== null` written after the choice
-          // asks about the arm that was taken. A text's absence is the null
-          // pointer, as it is for the coalesce and the null test: an empty text
-          // is a value the source wrote, and the two are not the same thing.
-          if (String(fieldOf(one,"k")) === "nothing") return absenceOf(fieldOf(value,"type"));
-          if (!isTextType(fieldOf(value,"type")) && (isTextType(fieldOf(one,"type")) || String(fieldOf(one,"k")) === "text")) {
-            return `${RUNTIME_NAME}_box_string(${this.raw(one, depth)})`;
-          }
-          return this.expression(one, fieldOf(value,"type"), depth);
-        };
-        return `((${this.condition(fieldOf(value,"condition"), depth)}) ? ${arm(fieldOf(value,"then"))} : ${arm(fieldOf(value,"otherwise"))})`;
-      }
+      case "select":
+        return this.selectExpression(value as SemanticValue & { k: "select" }, null, depth);
 
       case "buffer":
         return this.buffer(value as SemanticValue & { k: "buffer" }, depth);

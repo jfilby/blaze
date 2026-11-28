@@ -868,6 +868,31 @@ test("a dynamic value written to a text field is unboxed at the write", async ()
   assert.equal(await lowered(fn, (name) => `printf("%s\\n", ${name}());`), "hello\n");
 });
 
+test("a selected text stored in a dynamic field is boxed at the write", async () => {
+  const ANY: SemanticType = { kind: "ref", of: null };
+  const holderType: SemanticType = { kind: "ref", of: null, name: "Holder" };
+  const objects: Record<string, ObjectLayout> = {
+    Holder: { name: "Holder", fields: [{ name: "value", type: "ref<any>", offset: 0 }], size: 8, align: 8 },
+  };
+  const selected: SemanticValue = {
+    k: "select",
+    type: TEXT,
+    condition: { k: "compare", type: BOOL, op: "eq", operand: TEXT, left: { k: "local", type: TEXT, name: "value" }, right: { k: "text", type: TEXT, parts: [] } },
+    then: { k: "nothing", type: TEXT },
+    otherwise: { k: "local", type: TEXT, name: "value" },
+  };
+  const fn = subject(TEXT, {
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: { kind: "object", name: "holder", mutable: true, type: holderType }, value: { k: "newObject", type: holderType, layout: "Holder", fields: [{ name: "value", value: { k: "nothing", type: ANY } }] }, line: 1 },
+      { k: "storeField", object: { k: "local", type: holderType, name: "holder" }, layout: "Holder", field: "value", value: selected, line: 2 },
+    ],
+    terminator: { k: "return", value: { k: "loadField", type: ANY, object: { k: "local", type: holderType, name: "holder" }, layout: "Holder", field: "value" } },
+  }, [{ kind: "value", name: "value", mutable: false, type: TEXT }], objects);
+  assert.equal(await lowered(fn, (name) => `printf("%s\\n", ${name}("hello"));`), "hello\n");
+});
+
 test("a reference is written as the address a driver writes for one", async () => {
   // A reference is no number of its own, and the C used to cast it to one, which
   // is not C at all: printing an object was a source the compiler refuses. An
