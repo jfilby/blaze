@@ -1873,6 +1873,21 @@ class FunctionEmitter {
   private expression(value: SemanticValue, as: SemanticType | null, depth: number): string {
     if (String(fieldOf(value,"k")) === "select") return this.selectExpression(value as SemanticValue & { k: "select" }, as, depth);
     const written = this.raw(value, depth);
+    const promisedRecord = String(fieldOf(value,"k")) === "call" &&
+      String(fieldOf(fieldOf(value,"call"),"callee")) === "Promise.await.value" &&
+      isReference(fieldOf(value,"type")) && fieldOf(fieldOf(value,"type"),"name") !== undefined;
+    if (promisedRecord) {
+      // The await service answers a dynamic handle even when the payload's IR
+      // type names a record. A runtime service taking that handle reads it as
+      // written; a named-reference use crosses through the pointer it holds.
+      if (as !== null && isNumber(as)) return written;
+      if (as !== null && isReference(as)) {
+        return String(fieldOf(as,"kind")) === "ref" && fieldOf(as,"of") === null && fieldOf(as,"name") === undefined
+          ? written
+          : `(${declaredType(as)})blaze_pointer_of_handle(${written})`;
+      }
+      if (as !== null && isTextType(as)) return `${RUNTIME_NAME}_to_text(blaze_value_from_dynamic(${written}))`;
+    }
     const asAny = as !== null && String(fieldOf(as,"kind")) === "ref" && fieldOf(as,"of") === null && fieldOf(as,"name") === undefined;
     // An absence read at a type is the zero of *that* type: a field of a text
     // the literal left out is the null pointer, and the handle of an unshaped
@@ -2292,7 +2307,10 @@ class FunctionEmitter {
     const raw = this.raw(value, depth);
     const type = fieldOf(value,"type") as SemanticType | undefined;
     const dynamic = type !== undefined && String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined;
-    return dynamic ? `blaze_pointer_of_handle(${raw})` : raw;
+    const promisedRecord = String(fieldOf(value,"k")) === "call" &&
+      String(fieldOf(fieldOf(value,"call"),"callee")) === "Promise.await.value" &&
+      type !== undefined && String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"name") !== undefined;
+    return dynamic || promisedRecord ? `blaze_pointer_of_handle(${raw})` : raw;
   }
 
   /** A closure's block, read out of the handle a closure value is held in. */

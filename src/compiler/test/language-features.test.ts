@@ -107,6 +107,23 @@ test("a dynamic handle returned at a record type crosses through its pointer", a
   }
 });
 
+test("an awaited record keeps its pointer representation", async () => {
+  // The promise service answers a dynamic handle even when the awaited payload
+  // names a record. Returning or reading that record must cross through the
+  // pointer the handle holds instead of casting the handle's double.
+  const source = [
+    "async function make(): Promise<{ n: number }> { return { n: 7 }; }",
+    "async function pass(): Promise<{ n: number }> { return await make(); }",
+    "async function read(): Promise<number> { const record = await pass(); return record.n; }",
+    "console.log(await read());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "7", `the ${backend} backend returns the awaited record`);
+  }
+});
+
 test("fs.existsSync answers whether a path names anything", async () => {
   // The probe is the runtime's: a file the test made is found, and the name
   // beside it is not. Both lowerings answer the same.
